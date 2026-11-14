@@ -1,0 +1,24 @@
+# Go build and test outputs
+/agentbox
+/agentbox-*.test
+/coverage.out
+/coverage.html
+/profile.out
+
+# Local agent snapshots and QEMU artifacts
+/.agent-snaps/
+*.qcow2
+*.qcow
+*.img
+/serial.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
