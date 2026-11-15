@@ -46,7 +46,12 @@ subvolume create, snapshot, and delete operations, not arbitrary commands or
 btrfs arguments. Keep the daemon running while using `agentbox`; stop it with
 Ctrl-C or SIGTERM.
 
-Initialize from the project directory. For an existing btrfs subvolume, run:
+Initialize each project from its project directory. The config file is
+per-project, so initializing one project does not modify any other project's
+settings. Commands select the config for the current directory or its nearest
+configured parent; use `--project DIR` to select a project explicitly.
+
+For an existing btrfs subvolume, run:
 
 ```sh
 ./agentbox init
@@ -62,15 +67,32 @@ before removing the backup:
 ./agentbox init --subvolume
 ```
 
-Review the generated config at `$XDG_CONFIG_HOME/agentbox/config.json` (or the
-platform's user config directory), then build the image:
+`init` prints the path to this project's config under
+`$XDG_CONFIG_HOME/agentbox/projects/` (or the platform's user config
+directory). Configure settings interactively, then build the image:
 
 ```sh
+./agentbox configure
 ./agentbox build
 ```
 
-The default config uses Podman, the `agentbox:latest` image, and GitHub Copilot
-CLI. (Change `"runtime"` to `"docker"` if you use Docker.)
+The full-screen menu groups settings by project, agent, container, network,
+and credentials.
+Use the arrow keys and Enter to navigate or edit fields. Press `s` to save and
+exit, or `q`/Ctrl-C to discard. Multiline settings such as the agent command
+use one value per line; Ctrl-S applies those edits. Press `q` or Ctrl-C to
+exit; if anything changed, agentbox asks whether to save, discard, or return
+to the menu. Use `agentbox config` as a shorter alias, or
+`agentbox configure --project DIR` to configure another registered project.
+Set `ACCESSIBLE=1` to use the screen-reader-friendly prompt mode instead of
+the full-screen menu.
+In **Container → Language toolchains**, use Space to select any combination of
+Java (OpenJDK 21), Node.js, Go, Rust, and C/C++ (GCC/G++, CMake, Ninja, GDB,
+and pkg-config). The image build installs all selected toolchains; selecting
+none keeps the existing Playwright-based image.
+
+Each project's default config uses Podman, the `agentbox:latest` image, and
+GitHub Copilot CLI. (Change `"runtime"` to `"docker"` if you use Docker.)
 It stores snapshots in `.agent-snaps` next to the project. That directory
 must reside on the same btrfs filesystem as the project: if `.agent-snaps` is a
 separate mount, the mounted filesystem must be the project's btrfs filesystem.
@@ -90,29 +112,58 @@ Other useful configuration fields:
 
 | Field | Purpose |
 | --- | --- |
-| `project` | Absolute path to the host project. |
-| `snapshot_dir` | Directory for btrfs snapshots; it must reside on the project's btrfs filesystem, including when it is a separate mount. |
+| `project` | Absolute path to this project's btrfs subvolume. |
+| `snapshot_dir` | Directory for this project's btrfs snapshots; it must reside on the same btrfs filesystem, including when it is a separate mount. |
 | `runtime` | `podman` or `docker`. |
 | `image` | Image used for agent and shell containers. |
+| `toolchains` | Optional list of toolchains to add to the agent image: `java`, `nodejs`, `go`, `rust`, `cpp`, and `custom` for a custom base Containerfile. |
+| `custom_containerfile` | Optional path used when `custom` is selected in `toolchains`. It builds a custom base image, then agentbox adds the selected built-in toolchains and its common agent setup. Relative paths are resolved from the project directory; the Containerfile's directory is its build context. |
 | `shm_size` | Maximum container shared-memory size; must be a finite size such as `8g` (Docker and Podman do not support unlimited); the default is `1g`. |
 | `mounts` | Extra `host:container[:opts]` volume mounts. `~/` paths are expanded. |
 | `env` | Names of host environment variables to pass through when set. The defaults include `GH_TOKEN` and `GITHUB_TOKEN`. |
+| `github_token` | Optional GitHub personal access token for Copilot. When set, it overrides host `GH_TOKEN` and `GITHUB_TOKEN` for agent and shell containers. |
 | `network` | `open` (default; unrestricted container networking), `none`, or `proxy` (domain allowlist). |
 | `allowed_domains` | Destination domains allowed when `network` is `proxy`. |
 | `proxy_image` | Container image used when `network` is `proxy`. |
 | `egress_network` | Runtime network used by the proxy when `network` is `proxy`. |
 
-Do not put token values or other secrets in the config file. Configure
-credentials in the host environment and list only their variable names in
-`env`.
+Set a Copilot token in the TUI's **Credentials** menu or in the project's
+`github_token` field. It is stored as plaintext in that project's JSON config,
+which agentbox writes with owner-only permissions (directory `0700`, file
+`0600`). Keep that file private and never commit or share it. The token is
+passed to the container runtime through its process environment, not as a
+command-line argument. If `github_token` is empty, the existing host
+environment-variable passthrough continues to work.
 
-The `Containerfile` defaults to a Playwright image. Use `--base` when building
-to select a compatible base image for your host and project's Playwright
-version:
+## Finish with a project
+
+After accepting or discarding all agent snapshots, run this from the project
+directory:
+
+```sh
+./agentbox finish
+```
+
+`finish` refuses while the project's snapshot directory contains entries. It
+copies the project into a regular directory, switches it into place, retains
+the former subvolume at `.agentbox-finish-*/original` for recovery, and removes
+that project's config file. Inspect the new directory before manually deleting
+the retained backup subvolume.
+
+The built-in Containerfile defaults to a Playwright image. `agentbox build`
+adds the selected language toolchains to it. Use `--base` when building to
+select a compatible Playwright base image for your host:
 
 ```sh
 ./agentbox build --base mcr.microsoft.com/playwright:v1.49.0-noble
 ```
+
+You may select `custom` together with built-in toolchains and enter a custom
+base Containerfile path in the TUI. Its build context is the directory
+containing that file. The custom base must be Debian/Ubuntu-compatible and
+provide Node.js and npm; agentbox adds its shared packages and Copilot CLI
+after building the custom base. `--base` cannot be combined with a custom base
+Containerfile.
 
 ## Run an agent
 
@@ -128,10 +179,14 @@ container. Agentbox attaches your terminal so you can see its progress and
 answer questions. The snapshot is mounted read/write at the project's
 original absolute path inside the container. The container's home directory
 is temporary; the snapshot is where project changes are persisted.
+For the default Copilot command, agentbox seeds Copilot's temporary config with
+the project path in its `trustedFolders` list, so Copilot trusts the project on
+each launch without persisting its home directory.
 
-Detach from the agent without stopping it by pressing **Ctrl-P, then Ctrl-Q**
-(the container runtime's default detach sequence). You can close the terminal
-after detaching; the agent container continues running.
+Detach from the agent without stopping it by pressing `Ctrl+Space`, then
+`Ctrl+Q`. Agentbox configures this sequence because Copilot uses Ctrl-P.
+You can close the terminal after detaching; the agent container continues
+running.
 
 Useful follow-up commands:
 
@@ -148,7 +203,7 @@ Useful follow-up commands:
 changes, and the container state (running, exited, or none).
 
 `attach` reconnects your terminal to a running agent. You can interact with it
-and detach again with **Ctrl-P, Ctrl-Q**.
+and detach again with `Ctrl+Space`, then `Ctrl+Q`.
 
 `watch` follows the agent's output without attaching stdin, so it is useful
 for watching progress from another terminal while someone else is attached.
@@ -231,14 +286,43 @@ domain-level restriction, not a complete security boundary. An agent has
 write access to its mounted snapshot; review its changes before accepting
 them, and only run agents and tool configurations you trust.
 
+## Shell completion
+
+Enable shell completion for `bash` or `zsh`:
+
+```sh
+# Bash
+./agentbox completion bash | sudo tee /etc/bash_completion.d/agentbox
+
+# Zsh
+./agentbox completion zsh | sudo tee /usr/share/zsh/site-functions/_agentbox
+```
+
+Or add to your shell configuration file:
+
+```sh
+# Bash (~/.bashrc)
+eval "$(agentbox completion bash)"
+
+# Zsh (~/.zshrc)
+eval "$(agentbox completion zsh)"
+```
+
+Completion includes command names, flags, flag values, and dynamic session
+names. The `--base` flag completes Git branch names; `--project` completes
+directory paths; `--net` completes network modes (`open`, `none`, `proxy`).
+
 ## Daemon integration tests
 
-The QEMU integration suite boots a minimal Alpine Linux guest, creates a real
-btrfs filesystem in a temporary virtual disk, and tests both the daemon
-protocol and the CLI workflow. The end-to-end workflow uses a small in-guest runtime fixture to build an
-image containing the deterministic dummy agent (no real agent or credentials),
-creates an example Git project, and exercises interactive
-start/detach/reattach, watch, shell, resume, list, accept, and discard:
+The Go-based QEMU integration suite boots an Alpine Linux guest, creates a real
+btrfs filesystem in a temporary virtual disk, and tests the daemon protocol
+and CLI workflows. It runs separate Docker and Podman end-to-end cases in
+addition to a lightweight runtime-fixture test. The Docker case starts a
+Docker daemon with overlay2 storage; the Podman case uses vfs storage. Both
+build a minimal local test image containing a deterministic dummy agent (no
+real coding agent or credentials), then exercise interactive
+start, client disconnect and reattach, watch, shell, resume, list, accept, and
+discard:
 
 ```sh
 ./scripts/qemu-integration.sh
@@ -248,20 +332,22 @@ The first run downloads Alpine's `v3.22` x86_64 netboot initramfs and
 `linux-virt` package to
 `$XDG_CACHE_HOME/agentbox/qemu/alpine-v3.22-x86_64/` (normally
 `~/.cache/agentbox/qemu/alpine-v3.22-x86_64/`). These are reused on later runs;
-the matching kernel and module package is selected from Alpine's package index. The guest
-installs btrfs tools, Expect, Git, tmux, and other test utilities at boot. Its
-runtime fixture simulates the container runtime interface for session/TTY
-workflow tests; it does not provide container isolation or validate Docker or
-Podman behavior. The daemon, btrfs snapshots, and agentbox CLI workflow are
-real. The host harness requires Bash, QEMU x86_64, `qemu-img`, Go, `curl`,
-`cpio`, `tar`, and network access on the first run and while the guest installs
-packages. The harness and guest test steps are split across `scripts/qemu/`,
-with the test image and project under `examples/`.
+the matching kernel and module package is selected from Alpine's package
+index. The guest installs btrfs tools, Git, tmux, Docker, and Podman at boot.
+Each real-runtime case builds its test image from `examples/qemu-agent/`; it
+does not use the production image or contact an agent service. The host
+requires Go, QEMU x86_64, `qemu-img`, `cpio`, and network access on the first
+run and while the guest installs packages and pulls the Alpine base image. The
+shell entry point only starts the Go runner; the guest shell script bootstraps
+Alpine. Test orchestration, runtime fixtures, and interactive PTY checks are
+implemented in Go under `scripts/qemu/` and `qemu_workflow_test.go`.
 
 ## Command reference
 
 ```text
 agentbox init [--subvolume]
+agentbox configure [--project DIR]
+agentbox finish [--project DIR]
 agentbox daemon
 agentbox build [--base IMAGE]
 agentbox start [--project DIR] [--net proxy|none|open] [--base REF] [--no-branch] NAME [TASK...]

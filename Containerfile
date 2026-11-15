@@ -4,9 +4,10 @@
 #   agentbox build --base mcr.microsoft.com/playwright:v1.49.0-noble
 ARG BASE=mcr.microsoft.com/playwright:v1.49.0-noble
 FROM ${BASE}
+USER root
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates curl build-essential \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # Agent CLI (change for claude / codex / etc., and update agent_cmd in the config).

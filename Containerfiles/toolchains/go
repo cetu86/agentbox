@@ -1,0 +1,4 @@
+# Go compiler and standard toolchain from the selected Debian/Ubuntu base image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends golang-go \
+ && rm -rf /var/lib/apt/lists/*

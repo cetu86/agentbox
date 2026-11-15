@@ -8,17 +8,37 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 )
 
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
 // run executes a command with inherited stdio and echoes it to stderr.
 func run(name string, args ...string) error {
+	return runWithEnv(name, nil, args...)
+}
+
+func runWithEnv(name string, overrides map[string]string, args ...string) error {
 	fmt.Fprintln(os.Stderr, "+", name, strings.Join(args, " "))
 	cmd := exec.Command(name, args...)
+	if len(overrides) != 0 {
+		cmd.Env = environmentWithOverrides(os.Environ(), overrides)
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+func environmentWithOverrides(environment []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(environment)+len(overrides))
+	for _, entry := range environment {
+		key, _, ok := strings.Cut(entry, "=")
+		if _, overridden := overrides[key]; !ok || !overridden {
+			result = append(result, entry)
+		}
+	}
+	for key, value := range overrides {
+		result = append(result, key+"="+value)
+	}
+	return result
 }
 
 // output captures trimmed stdout.
@@ -54,16 +74,11 @@ func initializeProjectSubvolume(project string) (string, error) {
 		return "", fmt.Errorf("project path %s must be a real directory", project)
 	}
 	parent := filepath.Dir(project)
-	parentInfo, err := os.Stat(parent)
+	mountPoint, err := isMountPoint(project)
 	if err != nil {
 		return "", err
 	}
-	projectStat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", errors.New("could not inspect project filesystem")
-	}
-	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
-	if !ok || projectStat.Dev != parentStat.Dev {
+	if mountPoint {
 		return "", errors.New("project directory must not be a mount point")
 	}
 	projectRootID, err := btrfsRootID(project)
@@ -116,6 +131,104 @@ func initializeProjectSubvolume(project string) (string, error) {
 		return "", removeStaging(fmt.Errorf("install btrfs project subvolume: %w", err))
 	}
 	return backup, nil
+}
+
+func finishProjectSubvolume(project string) (string, error) {
+	project, err := filepath.Abs(project)
+	if err != nil {
+		return "", err
+	}
+	project = filepath.Clean(project)
+	if project == string(filepath.Separator) {
+		return "", errors.New("refusing to convert the filesystem root into a project directory")
+	}
+	info, err := os.Lstat(project)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("project path %s must be a real directory", project)
+	}
+	parent := filepath.Dir(project)
+	mountPoint, err := isMountPoint(project)
+	if err != nil {
+		return "", err
+	}
+	if mountPoint {
+		return "", errors.New("project directory must not be a mount point")
+	}
+	projectRootID, err := btrfsRootID(project)
+	if err != nil {
+		return "", err
+	}
+	parentRootID, err := btrfsRootID(parent)
+	if err != nil {
+		return "", err
+	}
+	if projectRootID == parentRootID {
+		return "", nil
+	}
+
+	stagingDir, err := os.MkdirTemp(parent, ".agentbox-finish-")
+	if err != nil {
+		return "", fmt.Errorf("create project finish directory: %w", err)
+	}
+	copiedProject := filepath.Join(stagingDir, "project")
+	copyCmd := exec.Command("cp", "-a", "--reflink=auto", "--", project, copiedProject)
+	if output, err := copyCmd.CombinedOutput(); err != nil {
+		cleanupErr := os.RemoveAll(stagingDir)
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("remove temporary project copy: %w", cleanupErr)
+		}
+		return "", errors.Join(
+			fmt.Errorf("copy project into a regular directory: %w: %s", err, strings.TrimSpace(string(output))),
+			cleanupErr,
+		)
+	}
+
+	backup := filepath.Join(stagingDir, "original")
+	if err := os.Rename(project, backup); err != nil {
+		cleanupErr := os.RemoveAll(stagingDir)
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("remove temporary project copy: %w", cleanupErr)
+		}
+		return "", errors.Join(fmt.Errorf("move project subvolume to backup: %w", err), cleanupErr)
+	}
+	if err := os.Rename(copiedProject, project); err != nil {
+		rollbackErr := os.Rename(backup, project)
+		if rollbackErr != nil {
+			return "", fmt.Errorf("install regular project directory: %w; original subvolume remains at %s: %v", err, backup, rollbackErr)
+		}
+		cleanupErr := os.RemoveAll(stagingDir)
+		if cleanupErr != nil {
+			cleanupErr = fmt.Errorf("remove temporary project copy: %w", cleanupErr)
+		}
+		return "", errors.Join(fmt.Errorf("install regular project directory: %w", err), cleanupErr)
+	}
+	return backup, nil
+}
+
+func isMountPoint(path string) (bool, error) {
+	path, err := cleanProjectPath(path)
+	if err != nil {
+		return false, err
+	}
+	mountInfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, fmt.Errorf("read mount table: %w", err)
+	}
+	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	for _, line := range strings.Split(string(mountInfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		mountPath := filepath.Clean(unescape.Replace(fields[4]))
+		if mountPath == path {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func btrfsRootID(path string) (string, error) {

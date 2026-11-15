@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,16 +10,15 @@ import (
 	"text/tabwriter"
 )
 
-//go:embed Containerfile
-var containerfile []byte
-
 const usageText = `agentbox - throwaway agent containers on btrfs snapshots of your working dir
 
 Usage: agentbox <command> [flags] [args]   (flags go before positional args)
 
-  init [--subvolume]         write config; --subvolume converts the current directory
+  init [--subvolume]         register this project; --subvolume converts it
+  configure [--project DIR]  interactively configure this project
+  finish                     remove this project's config and restore a normal directory
   daemon                     run the privileged btrfs companion daemon
-  build                      build the agent image from the embedded Containerfile
+  build                      build the agent image from the configured Containerfile
   start   <name> [task...]   snapshot, branch agent/<name>, start and attach agent
   resume  <name> [task...]   restart agent on an existing snapshot and attach
   attach  <name>             reconnect to a running agent's interactive terminal
@@ -30,6 +29,7 @@ Usage: agentbox <command> [flags] [args]   (flags go before positional args)
   accept  <name>             bring work back: git fetch (default) or --promote
   discard <name>             stop container and delete the snapshot
   proxy   up|down|logs       manage the allowlist proxy
+  completion <bash|zsh>      print shell completion setup
 
 Common flags: --project DIR, --net proxy|none|open
 `
@@ -44,10 +44,16 @@ func main() {
 	switch cmd {
 	case "__authorize-fds":
 		err = runAuthorizeChild(args)
+	case "__complete":
+		err = completionCandidates(args)
 	case "daemon":
 		err = cmdDaemon(args)
 	case "init":
 		err = cmdInit(args)
+	case "configure", "config":
+		err = cmdConfigure(args)
+	case "finish":
+		err = cmdFinish(args)
 	case "build":
 		err = cmdBuild(args)
 	case "start":
@@ -70,6 +76,8 @@ func main() {
 		err = cmdDiscard(args)
 	case "proxy":
 		err = cmdProxy(args)
+	case "completion":
+		err = cmdCompletion(args)
 	default:
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
@@ -91,12 +99,9 @@ func parse(name string, args []string, extra func(*flag.FlagSet)) (*Config, []st
 	if err := fs.Parse(args); err != nil {
 		return nil, nil, err
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigFor(*project)
 	if err != nil {
 		return nil, nil, err
-	}
-	if *project != "" {
-		cfg.Project, _ = filepath.Abs(*project)
 	}
 	if *network != "" {
 		cfg.Network = *network
@@ -124,13 +129,7 @@ func cmdInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	config, err := configPath()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(config); err == nil {
-		return fmt.Errorf("%s already exists", config)
-	} else if !os.IsNotExist(err) {
+	if err := validateConfigForRegistration(wd); err != nil {
 		return err
 	}
 	var backup string
@@ -140,39 +139,109 @@ func cmdInit(args []string) error {
 			return err
 		}
 	}
-	p, err := writeDefaultConfig(wd)
+	p, err := registerProject(wd)
 	if err != nil {
 		return err
 	}
-	fmt.Println("wrote", p, "- review it, then run `agentbox build`")
+	fmt.Printf("registered project %s in %s - run `agentbox configure` to adjust settings, then `agentbox build`\n", wd, p)
 	if backup != "" {
 		fmt.Printf("project is now a btrfs subvolume; original files retained at %s\n", backup)
 	}
 	return nil
 }
 
-func cmdBuild(args []string) error {
+func cmdFinish(args []string) error {
+	cfg, rest, err := parse("finish", args, nil)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("usage: agentbox finish [--project DIR]")
+	}
+	entries, err := os.ReadDir(cfg.SnapshotDir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("project has %d entries in %s; accept or discard agent snapshots before finishing", len(entries), cfg.SnapshotDir)
+	}
+
+	backup, err := finishProjectSubvolume(cfg.Project)
+	if err != nil {
+		return err
+	}
+	p, err := configPath(cfg.Project)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil {
+		if backup != "" {
+			return fmt.Errorf("project is now a regular directory and its original subvolume is retained at %s, but could not remove config %s: %w", backup, p, err)
+		}
+		return fmt.Errorf("project is already a regular directory, but could not remove config %s: %w", p, err)
+	}
+	if backup == "" {
+		fmt.Printf("project is already a regular directory; removed config %s\n", p)
+	} else {
+		fmt.Printf("project is now a regular directory; removed config %s; original subvolume retained at %s\n", p, backup)
+	}
+	return nil
+}
+
+func cmdBuild(args []string) (retErr error) {
 	var base string
 	cfg, _, err := parse("build", args, func(fs *flag.FlagSet) {
-		fs.StringVar(&base, "base", "", "base image (match your host libc and Playwright version)")
+		fs.StringVar(&base, "base", "", "base image for built-in toolchains (match Playwright and host libc)")
 	})
 	if err != nil {
 		return err
+	}
+	if err := validateToolchainConfig(cfg); err != nil {
+		return err
+	}
+	useCustomBase := containsString(cfg.Toolchains, customToolchain)
+	if useCustomBase && base != "" {
+		return fmt.Errorf("--base cannot be used with a custom base Containerfile")
 	}
 	dir, err := os.MkdirTemp("", "agentbox-build")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
+
+	baseImage := base
+	if useCustomBase {
+		customFile, err := resolveCustomContainerfile(cfg)
+		if err != nil {
+			return err
+		}
+		tempImage := "agentbox-custom-base:build-" + strings.TrimPrefix(filepath.Base(dir), "agentbox-build")
+		customArgs := []string{"build", "-t", tempImage, "-f", customFile, filepath.Dir(customFile)}
+		if err := run(cfg.Runtime, customArgs...); err != nil {
+			return fmt.Errorf("build custom base Containerfile %s: %w", customFile, err)
+		}
+		defer func() {
+			if err := run(cfg.Runtime, "rmi", "-f", tempImage); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("remove temporary custom base image %s: %w", tempImage, err))
+			}
+		}()
+		baseImage = tempImage
+	}
+
 	cf := filepath.Join(dir, "Containerfile")
-	if err := os.WriteFile(cf, containerfile, 0o644); err != nil {
+	data, err := renderContainerfile(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(cf, data, 0o644); err != nil {
 		return err
 	}
 	a := []string{"build", "-t", cfg.Image, "-f", cf}
-	if base != "" {
-		a = append(a, "--build-arg", "BASE="+base)
+	if baseImage != "" {
+		a = append(a, "--build-arg", "BASE="+baseImage)
 	}
-	return run(cfg.Runtime, append(a, dir)...)
+	retErr = run(cfg.Runtime, append(a, dir)...)
+	return retErr
 }
 
 // cmdStart snapshots (create=true) or reuses (create=false) and launches the agent.
@@ -263,7 +332,7 @@ func cmdAttach(args []string) error {
 	if !containerIsRunning(status) {
 		return fmt.Errorf("agent container for %q is not running; use `agentbox watch %s` to review output or `agentbox resume %s` to restart it", name, name, name)
 	}
-	return run(cfg.Runtime, "attach", cfg.containerName(name))
+	return cfg.attachContainer(name)
 }
 
 func cmdWatch(args []string) error {

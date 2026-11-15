@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -12,6 +16,9 @@ const (
 	proxyName = "agentbox-proxy"
 	intNet    = "agentbox-int" // internal network: no route out except via the proxy
 	proxyPort = "3128"
+
+	containerDetachKeys    = "ctrl-@,ctrl-q"
+	copilotBootstrapScript = `umask 077 && mkdir -p "$HOME/.copilot" && printf '%s' "$1" > "$HOME/.copilot/config.json" && shift && exec "$@"`
 )
 
 func (c *Config) containerName(name string) string { return "agentbox-" + name }
@@ -73,10 +80,24 @@ func (c *Config) launch(name, snap string, cmd []string) error {
 	if err != nil {
 		return err
 	}
-	if err := run(c.Runtime, args...); err != nil {
+	if err := c.runContainerRuntime(args...); err != nil {
 		return err
 	}
-	return run(c.Runtime, "attach", c.containerName(name))
+	return c.attachContainer(name)
+}
+
+func (c *Config) attachContainer(name string) error {
+	args := []string{"attach", "--detach-keys", containerDetachKeys, c.containerName(name)}
+	fmt.Fprintln(os.Stderr, "+", c.Runtime, strings.Join(args, " "))
+	cmd := exec.Command(c.Runtime, args...)
+	cmd.Stdin, cmd.Stdout = os.Stdin, os.Stdout
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	err := cmd.Run()
+	if err != nil && strings.TrimSpace(stderr.String()) == "read escape sequence" {
+		return nil
+	}
+	return err
 }
 
 func (c *Config) launchShell(name, snap string) error {
@@ -84,7 +105,17 @@ func (c *Config) launchShell(name, snap string) error {
 	if err != nil {
 		return err
 	}
-	return run(c.Runtime, args...)
+	return c.runContainerRuntime(args...)
+}
+
+func (c *Config) runContainerRuntime(args ...string) error {
+	if c.GitHubToken == "" {
+		return run(c.Runtime, args...)
+	}
+	return runWithEnv(c.Runtime, map[string]string{
+		"GH_TOKEN":     c.GitHubToken,
+		"GITHUB_TOKEN": c.GitHubToken,
+	}, args...)
 }
 
 // containerArgs configures a container with the snapshot mounted at the
@@ -99,6 +130,21 @@ func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([
 		"-e", "HOME=/home/agent",
 		"--tmpfs", "/home/agent:exec,mode=1777",
 	}
+	if isCopilotCommand(cmd) {
+		config, err := json.Marshal(struct {
+			TrustedFolders []string `json:"trustedFolders"`
+		}{TrustedFolders: []string{c.Project}})
+		if err != nil {
+			return nil, fmt.Errorf("configure trusted Copilot project: %w", err)
+		}
+		args = append(args, "--entrypoint", "/bin/sh")
+		cmd = append([]string{
+			"-c",
+			copilotBootstrapScript,
+			"agentbox-copilot-bootstrap",
+			string(config),
+		}, cmd...)
+	}
 	if managed {
 		args = append(args, "-d", "-i", "-t", "--name", c.containerName(name))
 	} else {
@@ -112,7 +158,13 @@ func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([
 	for _, m := range c.Mounts {
 		args = append(args, "-v", expandHome(m))
 	}
+	if c.GitHubToken != "" {
+		args = append(args, "-e", "GH_TOKEN", "-e", "GITHUB_TOKEN")
+	}
 	for _, k := range c.Env {
+		if c.GitHubToken != "" && (k == "GH_TOKEN" || k == "GITHUB_TOKEN") {
+			continue
+		}
 		if _, ok := os.LookupEnv(k); ok {
 			args = append(args, "-e", k) // value is inherited, never appears in argv
 		}
@@ -132,6 +184,10 @@ func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([
 	args = append(args, c.Image)
 	args = append(args, cmd...)
 	return args, nil
+}
+
+func isCopilotCommand(cmd []string) bool {
+	return len(cmd) > 0 && filepath.Base(cmd[0]) == "copilot"
 }
 
 func (c *Config) networkArgs() ([]string, error) {
