@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -15,9 +16,32 @@ const (
 
 func (c *Config) containerName(name string) string { return "agentbox-" + name }
 
-func (c *Config) containerRunning(name string) bool {
-	out, _ := output(c.Runtime, "ps", "--filter", "name=^"+c.containerName(name)+"$", "--format", "{{.Names}}")
-	return out != ""
+func (c *Config) containerStatus(name string) (string, error) {
+	filter := "name=^" + regexp.QuoteMeta(c.containerName(name)) + "$"
+	out, err := output(c.Runtime, "ps", "-a", "--filter", filter, "--format", "{{.Status}}")
+	if err != nil {
+		return "", fmt.Errorf("inspect container state: %w", err)
+	}
+	return out, nil
+}
+
+func containerIsRunning(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	return status == "running" || strings.HasPrefix(status, "up ")
+}
+
+func (c *Config) removeStoppedContainer(name string) error {
+	status, err := c.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return nil
+	}
+	if containerIsRunning(status) {
+		return fmt.Errorf("container for %q is already running; attach to it or stop it first", name)
+	}
+	return run(c.Runtime, "rm", c.containerName(name))
 }
 
 // agentCommand substitutes the task into agent_cmd. With no task, the {task}
@@ -40,18 +64,45 @@ func (c *Config) agentCommand(task string) []string {
 	return out
 }
 
-// launch runs cmd in a throwaway container with the snapshot mounted at the
-// project's original absolute path (keeps absolute paths in caches valid).
+// launch starts a persistent agent container and attaches the current terminal.
 func (c *Config) launch(name, snap string, cmd []string) error {
+	if err := c.removeStoppedContainer(name); err != nil {
+		return err
+	}
+	args, err := c.containerArgs(name, snap, cmd, true)
+	if err != nil {
+		return err
+	}
+	if err := run(c.Runtime, args...); err != nil {
+		return err
+	}
+	return run(c.Runtime, "attach", c.containerName(name))
+}
+
+func (c *Config) launchShell(name, snap string) error {
+	args, err := c.containerArgs(name, snap, []string{"bash"}, false)
+	if err != nil {
+		return err
+	}
+	return run(c.Runtime, args...)
+}
+
+// containerArgs configures a container with the snapshot mounted at the
+// project's original absolute path (keeps absolute paths in caches valid).
+func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([]string, error) {
 	args := []string{
-		"run", "--rm", "-it",
-		"--name", c.containerName(name),
+		"run",
 		"--hostname", name,
 		"-v", snap + ":" + c.Project,
 		"-w", c.Project,
 		"--shm-size", c.ShmSize,
 		"-e", "HOME=/home/agent",
 		"--tmpfs", "/home/agent:exec,mode=1777",
+	}
+	if managed {
+		args = append(args, "-d", "-i", "-t", "--name", c.containerName(name))
+	} else {
+		args = append(args, "--rm", "-it")
 	}
 	if c.Runtime == "podman" {
 		args = append(args, "--userns=keep-id")
@@ -75,12 +126,12 @@ func (c *Config) launch(name, snap string, cmd []string) error {
 
 	netArgs, err := c.networkArgs()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	args = append(args, netArgs...)
 	args = append(args, c.Image)
 	args = append(args, cmd...)
-	return run(c.Runtime, args...)
+	return args, nil
 }
 
 func (c *Config) networkArgs() ([]string, error) {

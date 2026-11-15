@@ -8,6 +8,7 @@ readonly CACHE_DIR="${AGENTBOX_QEMU_CACHE_DIR:-"$CACHE_ROOT/agentbox/qemu/alpine
 readonly WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentbox-qemu.XXXXXXXX")"
 readonly QEMU="${QEMU:-qemu-system-x86_64}"
 readonly QEMU_IMG="${QEMU_IMG:-qemu-img}"
+source "$ROOT/scripts/qemu/lib.sh"
 
 cleanup() {
 	rm -rf -- "$WORK_DIR"
@@ -26,19 +27,6 @@ for tool in "${required_tools[@]}"; do
 done
 
 mkdir -p -- "$CACHE_DIR"
-
-fetch_cached() {
-	local name="$1" url="$2" target="$CACHE_DIR/$1" temporary
-	if [[ ! -s "$target" ]]; then
-		printf 'Downloading Alpine %s %s into %s\n' "$ALPINE_VERSION" "$name" "$CACHE_DIR" >&2
-		temporary="$(mktemp "$CACHE_DIR/.${name}.XXXXXX")"
-		if ! curl --fail --location --retry 3 --output "$temporary" "$url"; then
-			rm -f -- "$temporary"
-			return 1
-		fi
-		mv -f -- "$temporary" "$target"
-	fi
-}
 
 readonly BASE_URL="https://dl-cdn.alpinelinux.org/alpine/$ALPINE_VERSION/releases/x86_64/netboot"
 fetch_cached initramfs-virt "$BASE_URL/initramfs-virt"
@@ -80,13 +68,17 @@ mkdir -p "$WORK_DIR/overlay/lib"
 cp -a "$WORK_DIR/kernel/lib/modules" "$WORK_DIR/overlay/lib/"
 install -m 0755 "$WORK_DIR/agentbox" "$WORK_DIR/overlay/agentbox"
 install -m 0755 "$WORK_DIR/agentbox-integration.test" "$WORK_DIR/overlay/agentbox-integration.test"
-mkdir -p "$WORK_DIR/overlay/bin" "$WORK_DIR/overlay/sbin" "$WORK_DIR/overlay/etc/apk"
+mkdir -p "$WORK_DIR/overlay/bin" "$WORK_DIR/overlay/sbin" "$WORK_DIR/overlay/etc/apk" \
+	"$WORK_DIR/overlay/qemu/examples/qemu-agent" "$WORK_DIR/overlay/qemu/examples/qemu-project"
+cp -a "$ROOT/scripts/qemu/." "$WORK_DIR/overlay/qemu/"
+cp -a "$ROOT/examples/qemu-agent/." "$WORK_DIR/overlay/qemu/examples/qemu-agent/"
+cp -a "$ROOT/examples/qemu-project/." "$WORK_DIR/overlay/qemu/examples/qemu-project/"
 printf 'https://dl-cdn.alpinelinux.org/alpine/%s/main\nhttps://dl-cdn.alpinelinux.org/alpine/%s/community\n' \
 	"$ALPINE_VERSION" "$ALPINE_VERSION" >"$WORK_DIR/overlay/etc/apk/repositories"
 printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n' \
 	>"$WORK_DIR/overlay/etc/passwd"
 printf 'root:x:0:\nnobody:x:65534:\n' >"$WORK_DIR/overlay/etc/group"
-busybox_applets=(cat chmod chown cp grep mkdir mount mv poweroff sed sleep su sync)
+busybox_applets=(cat chmod chown cp grep mkdir mount mv poweroff rm sed sleep su sync)
 for applet in "${busybox_applets[@]}"; do
 	ln -s /bin/busybox "$WORK_DIR/overlay/bin/$applet"
 	ln -s /bin/busybox "$WORK_DIR/overlay/sbin/$applet"
@@ -95,93 +87,8 @@ network_applets=(ip udhcpc)
 for applet in "${network_applets[@]}"; do
 	ln -s /bin/busybox "$WORK_DIR/overlay/sbin/$applet"
 done
-cat >"$WORK_DIR/overlay/agentbox-init" <<'GUEST_INIT'
-#!/bin/sh
-set -eu
-
-export PATH=/sbin:/bin:/usr/sbin:/usr/bin
-export HOME=/root
-
-fail() {
-	echo "AGENTBOX_QEMU_RESULT=FAIL: $*" >/dev/console
-	/sbin/poweroff -f
-	exit 1
-}
-
-exec >/dev/console 2>&1
-echo "agentbox QEMU integration guest starting"
-
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /dev/pts /run /tmp /mnt/test
-mount -t devpts devpts /dev/pts
-chmod 1777 /tmp
-
-modprobe virtio_blk 2>/dev/null || true
-ip link set lo up
-modprobe virtio_net 2>/dev/null || true
-ip link set eth0 up || fail "QEMU network interface eth0 is unavailable"
-udhcpc -n -q -t 10 -T 2 -i eth0 || fail "could not configure network for Alpine packages"
-mkdir -p /lib/apk/db
-apk --initdb add --no-cache bash btrfs-progs coreutils || fail "could not install Bash, coreutils, and btrfs tools"
-modprobe btrfs || fail "could not load btrfs kernel module"
-
-disk=/dev/vda
-tries=0
-while [ ! -b "$disk" ] && [ "$tries" -lt 20 ]; do
-	sleep 1
-	tries=$((tries + 1))
-done
-[ -b "$disk" ] || fail "QEMU test disk not found"
-mkfs.btrfs -f "$disk" || fail "could not create btrfs test filesystem"
-mount -t btrfs "$disk" /mnt/test || fail "could not mount btrfs test filesystem"
-
-btrfs subvolume create /mnt/test/source || fail "could not create source subvolume"
-mkdir -p /mnt/test/allowed /mnt/test/private-dest
-mkdir -p /mnt/test/private-source
-printf 'qemu daemon integration\n' >/mnt/test/source/payload.txt
-chown -R nobody:nobody /mnt/test/source /mnt/test/allowed
-chmod 0700 /mnt/test/private-source /mnt/test/private-dest
-
-/agentbox daemon >/tmp/agentbox-daemon.log 2>&1 &
-daemon_pid=$!
-tries=0
-while [ ! -S /run/agentbox/agentbox.sock ] && [ "$tries" -lt 20 ]; do
-	kill -0 "$daemon_pid" 2>/dev/null || fail "daemon exited: $(cat /tmp/agentbox-daemon.log)"
-	sleep 1
-	tries=$((tries + 1))
-done
-[ -S /run/agentbox/agentbox.sock ] || fail "daemon socket was not created"
-
-export AGENTBOX_QEMU_GUEST=1
-export AGENTBOX_QEMU_SOURCE=/mnt/test/source
-export AGENTBOX_QEMU_DESTINATION=/mnt/test/allowed/snapshot
-export AGENTBOX_QEMU_PRIVATE_SOURCE=/mnt/test/private-source
-export AGENTBOX_QEMU_DENIED_DESTINATION=/mnt/test/allowed/denied-source
-export AGENTBOX_QEMU_PRIVATE_DESTINATION=/mnt/test/private-dest/denied-destination
-export AGENTBOX_QEMU_CREATE_PATH=/mnt/test/allowed/created-subvolume
-export AGENTBOX_QEMU_PRIVATE_CREATE_PATH=/mnt/test/private-dest/denied-subvolume
-export AGENTBOX_QEMU_PROJECT_PARENT=/mnt/test/allowed
-set +e
-su nobody -s /bin/bash -c 'exec /agentbox-integration.test -test.run "^TestQEMU" -test.v'
-test_status=$?
-set -e
-if [ "$test_status" -ne 0 ]; then
-	cat /tmp/agentbox-daemon.log
-	fail "Go integration tests failed (status $test_status)"
-fi
-[ ! -e /mnt/test/allowed/denied-source ] || fail "denied snapshot source created a destination"
-[ ! -e /mnt/test/private-dest/denied-destination ] || fail "denied snapshot destination was created"
-[ ! -e /mnt/test/private-dest/denied-subvolume ] || fail "denied subvolume creation left a destination"
-
-kill -TERM "$daemon_pid"
-wait "$daemon_pid" || fail "daemon did not shut down cleanly"
-echo "AGENTBOX_QEMU_RESULT=PASS"
-sync
-/sbin/poweroff -f
-GUEST_INIT
-chmod 0755 "$WORK_DIR/overlay/agentbox-init"
+chmod -R a+rX "$WORK_DIR/overlay/qemu"
+ln -s /qemu/guest-init.sh "$WORK_DIR/overlay/agentbox-init"
 
 (cd "$WORK_DIR/overlay" && find . -print | cpio --quiet -o -H newc) >"$WORK_DIR/overlay.cpio"
 cat "$CACHE_DIR/initramfs-virt" "$WORK_DIR/overlay.cpio" >"$WORK_DIR/initramfs"

@@ -20,9 +20,11 @@ Usage: agentbox <command> [flags] [args]   (flags go before positional args)
   init [--subvolume]         write config; --subvolume converts the current directory
   daemon                     run the privileged btrfs companion daemon
   build                      build the agent image from the embedded Containerfile
-  start   <name> [task...]   snapshot, branch agent/<name>, run agent TUI in a container
-  resume  <name> [task...]   new container on an existing snapshot
-  shell   <name>             shell in the running container (or a fresh one)
+  start   <name> [task...]   snapshot, branch agent/<name>, start and attach agent
+  resume  <name> [task...]   restart agent on an existing snapshot and attach
+  attach  <name>             reconnect to a running agent's interactive terminal
+  watch   <name>             follow agent output without sending input
+  shell   <name>             open Bash in the agent container or snapshot
   path    <name>             print snapshot path (e.g. goland $(agentbox path foo))
   list                       show snapshots, branches, dirty state, running containers
   accept  <name>             bring work back: git fetch (default) or --promote
@@ -54,6 +56,10 @@ func main() {
 		err = cmdStart(args, false)
 	case "shell":
 		err = cmdShell(args)
+	case "attach":
+		err = cmdAttach(args)
+	case "watch":
+		err = cmdWatch(args)
 	case "path":
 		err = cmdPath(args)
 	case "list", "ls":
@@ -184,6 +190,15 @@ func cmdStart(args []string, create bool) error {
 	if err != nil {
 		return err
 	}
+	if create {
+		status, err := cfg.containerStatus(name)
+		if err != nil {
+			return err
+		}
+		if containerIsRunning(status) {
+			return fmt.Errorf("container for %q is already running; attach to it or choose another name", name)
+		}
+	}
 	task := strings.Join(rest[1:], " ")
 
 	var snap string
@@ -219,10 +234,58 @@ func cmdShell(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.containerRunning(name) {
+	status, err := cfg.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if containerIsRunning(status) {
 		return run(cfg.Runtime, "exec", "-it", cfg.containerName(name), "bash")
 	}
-	return cfg.launch(name, snap, []string{"bash"})
+	return cfg.launchShell(name, snap)
+}
+
+func cmdAttach(args []string) error {
+	cfg, rest, err := parse("attach", args, nil)
+	if err != nil {
+		return err
+	}
+	name, err := needName(rest)
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.requireSnapshot(name); err != nil {
+		return err
+	}
+	status, err := cfg.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if !containerIsRunning(status) {
+		return fmt.Errorf("agent container for %q is not running; use `agentbox watch %s` to review output or `agentbox resume %s` to restart it", name, name, name)
+	}
+	return run(cfg.Runtime, "attach", cfg.containerName(name))
+}
+
+func cmdWatch(args []string) error {
+	cfg, rest, err := parse("watch", args, nil)
+	if err != nil {
+		return err
+	}
+	name, err := needName(rest)
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.requireSnapshot(name); err != nil {
+		return err
+	}
+	status, err := cfg.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return fmt.Errorf("no agent container for %q; start or resume the agent first", name)
+	}
+	return run(cfg.Runtime, "logs", "-f", cfg.containerName(name))
 }
 
 func cmdPath(args []string) error {
@@ -251,7 +314,7 @@ func cmdList(args []string) error {
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tBRANCH\tDIRTY\tRUNNING")
+	fmt.Fprintln(w, "NAME\tBRANCH\tDIRTY\tCONTAINER")
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -259,7 +322,14 @@ func cmdList(args []string) error {
 		p := cfg.snapPath(e.Name())
 		branch, _ := gitOut(p, "rev-parse", "--abbrev-ref", "HEAD")
 		dirty, _ := isDirty(p)
-		fmt.Fprintf(w, "%s\t%s\t%v\t%v\n", e.Name(), branch, dirty, cfg.containerRunning(e.Name()))
+		status, err := cfg.containerStatus(e.Name())
+		if err != nil {
+			return err
+		}
+		if status == "" {
+			status = "none"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%v\t%s\n", e.Name(), branch, dirty, status)
 	}
 	return w.Flush()
 }
@@ -282,7 +352,11 @@ func cmdAccept(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.containerRunning(name) {
+	status, err := cfg.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if containerIsRunning(status) {
 		return fmt.Errorf("container for %q is still running", name)
 	}
 
@@ -308,6 +382,9 @@ func cmdAccept(args []string) error {
 	if keep {
 		return nil
 	}
+	if err := cfg.removeStoppedContainer(name); err != nil {
+		return err
+	}
 	return cfg.deleteSnapshot(name)
 }
 
@@ -323,7 +400,15 @@ func cmdDiscard(args []string) error {
 	if _, err := cfg.requireSnapshot(name); err != nil {
 		return err
 	}
-	_ = run(cfg.Runtime, "rm", "-f", cfg.containerName(name)) // ok if it doesn't exist
+	status, err := cfg.containerStatus(name)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		if err := run(cfg.Runtime, "rm", "-f", cfg.containerName(name)); err != nil {
+			return err
+		}
+	}
 	return cfg.deleteSnapshot(name)
 }
 

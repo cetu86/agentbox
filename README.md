@@ -123,23 +123,36 @@ Start a new agent session with a unique, lowercase name and a task:
 ```
 
 This creates a btrfs snapshot, creates the Git branch `agent/refactor-api` by
-default, then launches the configured agent in a container. The snapshot is
-mounted read/write at the project's original absolute path inside the
-container. The container's home directory is temporary; the snapshot is where
-project changes are persisted.
+default, then launches the configured agent in a persistent interactive
+container. Agentbox attaches your terminal so you can see its progress and
+answer questions. The snapshot is mounted read/write at the project's
+original absolute path inside the container. The container's home directory
+is temporary; the snapshot is where project changes are persisted.
+
+Detach from the agent without stopping it by pressing **Ctrl-P, then Ctrl-Q**
+(the container runtime's default detach sequence). You can close the terminal
+after detaching; the agent container continues running.
 
 Useful follow-up commands:
 
 ```sh
 ./agentbox list
+./agentbox attach refactor-api
+./agentbox watch refactor-api
 ./agentbox shell refactor-api
 ./agentbox path refactor-api
 ./agentbox resume refactor-api "Continue by fixing the failing test"
 ```
 
 `list` shows each session's branch, whether its working tree has uncommitted
-changes, and whether its container is running. Use it to find active work and
-check what is ready to accept.
+changes, and the container state (running, exited, or none).
+
+`attach` reconnects your terminal to a running agent. You can interact with it
+and detach again with **Ctrl-P, Ctrl-Q**.
+
+`watch` follows the agent's output without attaching stdin, so it is useful
+for watching progress from another terminal while someone else is attached.
+It can also show the output of an exited container.
 
 `shell` opens an interactive Bash in the agent's existing container. If that
 container has stopped, it starts a new shell container on the same snapshot,
@@ -153,9 +166,10 @@ code "$(./agentbox path refactor-api)"
 ```
 
 `resume` starts the configured agent again in a new container using the same
-snapshot and branch; it does not create another snapshot or branch. Pass a new
-task to continue or redirect the work. Use `shell` instead when you want an
-interactive terminal rather than the agent.
+snapshot and branch; it does not create another snapshot or branch. It removes
+the previous container if it has exited, then attaches your terminal to the
+new run. Pass a new task to continue or redirect the work. Use `shell` instead
+when you want an interactive terminal rather than the agent.
 
 When the work is ready, stop the container and choose how to bring it back:
 
@@ -219,22 +233,30 @@ them, and only run agents and tool configurations you trust.
 
 ## Daemon integration tests
 
-The daemon integration suite boots a minimal Alpine Linux guest under QEMU,
-creates a real btrfs filesystem in a temporary virtual disk, and exercises
-subvolume creation and project migration, snapshot and delete, denied-path,
-and unsupported-operation requests against the running daemon:
+The QEMU integration suite boots a minimal Alpine Linux guest, creates a real
+btrfs filesystem in a temporary virtual disk, and tests both the daemon
+protocol and the CLI workflow. The end-to-end workflow uses a small in-guest runtime fixture to build an
+image containing the deterministic dummy agent (no real agent or credentials),
+creates an example Git project, and exercises interactive
+start/detach/reattach, watch, shell, resume, list, accept, and discard:
 
 ```sh
 ./scripts/qemu-integration.sh
 ```
 
 The first run downloads Alpine's `v3.22` x86_64 netboot initramfs and
-`linux-virt` package to `$XDG_CACHE_HOME/agentbox/qemu/` (normally
-`~/.cache/agentbox/qemu/`). These are reused on later runs; the matching
-kernel and module package is selected from Alpine's package index. Alpine's
-`btrfs-progs` package is installed inside the guest at boot. The harness
-requires Bash, QEMU x86_64, `qemu-img`, Go, `curl`, `cpio`, `tar`, and network
-access on the first run and while the guest installs its packages.
+`linux-virt` package to
+`$XDG_CACHE_HOME/agentbox/qemu/alpine-v3.22-x86_64/` (normally
+`~/.cache/agentbox/qemu/alpine-v3.22-x86_64/`). These are reused on later runs;
+the matching kernel and module package is selected from Alpine's package index. The guest
+installs btrfs tools, Expect, Git, tmux, and other test utilities at boot. Its
+runtime fixture simulates the container runtime interface for session/TTY
+workflow tests; it does not provide container isolation or validate Docker or
+Podman behavior. The daemon, btrfs snapshots, and agentbox CLI workflow are
+real. The host harness requires Bash, QEMU x86_64, `qemu-img`, Go, `curl`,
+`cpio`, `tar`, and network access on the first run and while the guest installs
+packages. The harness and guest test steps are split across `scripts/qemu/`,
+with the test image and project under `examples/`.
 
 ## Command reference
 
@@ -244,6 +266,8 @@ agentbox daemon
 agentbox build [--base IMAGE]
 agentbox start [--project DIR] [--net proxy|none|open] [--base REF] [--no-branch] NAME [TASK...]
 agentbox resume [--project DIR] [--net proxy|none|open] NAME [TASK...]
+agentbox attach [--project DIR] NAME
+agentbox watch [--project DIR] NAME
 agentbox shell [--project DIR] [--net proxy|none|open] NAME
 agentbox path [--project DIR] NAME
 agentbox list [--project DIR]
