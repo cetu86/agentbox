@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	daemonSocketPath = "/run/agentbox/agentbox.sock"
-	maxRequestSize   = 64 * 1024
-	maxDaemonClients = 8
+	daemonSocketPath         = "/run/agentbox/agentbox.sock"
+	firstExtraFileDescriptor = 3
+	maxRequestSize           = 64 * 1024
+	maxDaemonClients         = 8
 )
 
 type btrfsRequest struct {
@@ -36,6 +37,33 @@ type btrfsRequest struct {
 
 type daemonResponse struct {
 	Error string `json:"error,omitempty"`
+}
+
+type authorizedPaths struct {
+	Source            *os.File
+	DestinationParent *os.File
+	Subvolume         *os.File
+}
+
+func (p *authorizedPaths) files() []*os.File {
+	var files []*os.File
+	for _, file := range []*os.File{p.Source, p.DestinationParent, p.Subvolume} {
+		if file != nil {
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+type childFiles []*os.File
+
+func (f childFiles) path(file *os.File) (string, error) {
+	for index, inherited := range f {
+		if inherited == file {
+			return fmt.Sprintf("/proc/self/fd/%d", firstExtraFileDescriptor+index), nil
+		}
+	}
+	return "", errors.New("file is not inherited by the child process")
 }
 
 func requestPrivileged(req btrfsRequest) error {
@@ -192,6 +220,10 @@ func readBtrfsRequest(conn *net.UnixConn) (btrfsRequest, error) {
 		if req.Source == "" || req.Path == "" {
 			return req, errors.New("snapshot requires source and path")
 		}
+	case "create":
+		if req.Path == "" || req.Source != "" {
+			return req, errors.New("create requires path only")
+		}
 	case "delete":
 		if req.Path == "" || req.Source != "" {
 			return req, errors.New("delete requires path only")
@@ -230,30 +262,61 @@ func executeBtrfsRequest(req btrfsRequest, cred *syscall.Ucred, btrfsPath string
 	if err != nil {
 		return err
 	}
-	fds, err := authorizePaths(req, cred, groups)
+	paths, err := authorizePaths(req, cred, groups)
 	if err != nil {
 		return err
 	}
-	defer closeFiles(fds)
+	defer closeFiles(paths.files())
 
 	if req.Op == "snapshot" {
-		return executeSnapshotRequest(req, btrfsPath, fds)
+		return executeSnapshotRequest(req, btrfsPath, paths)
 	}
-	args := []string{"subvolume", "delete", "/proc/self/fd/3"}
-	return runBtrfsCommand(btrfsPath, fds, args...)
+	if req.Op == "create" {
+		files := childFiles(paths.files())
+		parentPath, err := files.path(paths.DestinationParent)
+		if err != nil {
+			return err
+		}
+		subvolumePath := filepath.Join(parentPath, filepath.Base(filepath.Clean(req.Path)))
+		if err := runBtrfsCommand(btrfsPath, files, "subvolume", "create", subvolumePath); err != nil {
+			return err
+		}
+		if err := unix.Fchownat(int(paths.DestinationParent.Fd()), filepath.Base(filepath.Clean(req.Path)), int(cred.Uid), int(cred.Gid), 0); err != nil {
+			deleteErr := runBtrfsCommand(btrfsPath, files, "subvolume", "delete", subvolumePath)
+			return errors.Join(fmt.Errorf("set subvolume ownership: %w", err), deleteErr)
+		}
+		return nil
+	}
+	files := childFiles(paths.files())
+	subvolumePath, err := files.path(paths.Subvolume)
+	if err != nil {
+		return err
+	}
+	return runBtrfsCommand(btrfsPath, files, "subvolume", "delete", subvolumePath)
 }
 
-func executeSnapshotRequest(req btrfsRequest, btrfsPath string, fds []*os.File) error {
-	parentFD := int(fds[1].Fd())
+func executeSnapshotRequest(req btrfsRequest, btrfsPath string, paths *authorizedPaths) error {
+	files := childFiles(paths.files())
+	sourcePath, err := files.path(paths.Source)
+	if err != nil {
+		return err
+	}
+	parentFD := int(paths.DestinationParent.Fd())
 	tempName, tempDir, err := createStagingDirectory(parentFD)
 	if err != nil {
 		return err
 	}
 	defer tempDir.Close()
 
-	files := append(append([]*os.File(nil), fds...), tempDir)
+	files = append(files, tempDir)
+	stagingPath, err := files.path(tempDir)
+	if err != nil {
+		cleanupErr := removeStagingDirectory(parentFD, tempName, int(tempDir.Fd()))
+		return errors.Join(err, cleanupErr)
+	}
+	stagingPath = filepath.Join(stagingPath, "snapshot")
 	operationErr := runBtrfsCommand(btrfsPath, files,
-		"subvolume", "snapshot", "/proc/self/fd/3", "/proc/self/fd/5/snapshot")
+		"subvolume", "snapshot", sourcePath, stagingPath)
 	if operationErr == nil {
 		destName := filepath.Base(filepath.Clean(req.Path))
 		if err := unix.Renameat2(int(tempDir.Fd()), "snapshot", parentFD, destName, unix.RENAME_NOREPLACE); err != nil {
@@ -261,7 +324,7 @@ func executeSnapshotRequest(req btrfsRequest, btrfsPath string, fds []*os.File) 
 		}
 	}
 	if operationErr != nil {
-		if err := deleteStagedSnapshot(btrfsPath, files, int(tempDir.Fd())); err != nil {
+		if err := deleteStagedSnapshot(btrfsPath, files, stagingPath, int(tempDir.Fd())); err != nil {
 			operationErr = errors.Join(operationErr, fmt.Errorf("remove staged snapshot: %w", err))
 		}
 	}
@@ -299,7 +362,7 @@ func createStagingDirectory(parentFD int) (string, *os.File, error) {
 	return "", nil, errors.New("could not allocate a unique snapshot staging directory")
 }
 
-func deleteStagedSnapshot(btrfsPath string, files []*os.File, dirFD int) error {
+func deleteStagedSnapshot(btrfsPath string, files childFiles, stagingPath string, dirFD int) error {
 	var info unix.Stat_t
 	if err := unix.Fstatat(dirFD, "snapshot", &info, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -310,7 +373,7 @@ func deleteStagedSnapshot(btrfsPath string, files []*os.File, dirFD int) error {
 	if info.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return errors.New("staged snapshot path is not a directory")
 	}
-	return runBtrfsCommand(btrfsPath, files, "subvolume", "delete", "/proc/self/fd/5/snapshot")
+	return runBtrfsCommand(btrfsPath, files, "subvolume", "delete", stagingPath)
 }
 
 func removeStagingDirectory(parentFD int, name string, dirFD int) error {
@@ -333,9 +396,9 @@ func removeStagingDirectory(parentFD int, name string, dirFD int) error {
 	return nil
 }
 
-func runBtrfsCommand(btrfsPath string, files []*os.File, args ...string) error {
+func runBtrfsCommand(btrfsPath string, files childFiles, args ...string) error {
 	cmd := exec.Command(btrfsPath, args...)
-	cmd.ExtraFiles = files
+	cmd.ExtraFiles = []*os.File(files)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -394,7 +457,7 @@ func peerGroups(cred *syscall.Ucred) ([]uint32, error) {
 	return groups, nil
 }
 
-func authorizePaths(req btrfsRequest, cred *syscall.Ucred, groups []uint32) ([]*os.File, error) {
+func authorizePaths(req btrfsRequest, cred *syscall.Ucred, groups []uint32) (*authorizedPaths, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -456,7 +519,16 @@ func authorizePaths(req btrfsRequest, cred *syscall.Ucred, groups []uint32) ([]*
 	for i, fd := range rights {
 		files[i] = os.NewFile(uintptr(fd), "authorized-directory")
 	}
-	return files, nil
+	paths := &authorizedPaths{}
+	switch req.Op {
+	case "snapshot":
+		paths.Source, paths.DestinationParent = files[0], files[1]
+	case "create":
+		paths.DestinationParent = files[0]
+	default:
+		paths.Subvolume = files[0]
+	}
+	return paths, nil
 }
 
 func runAuthorizeChild(args []string) error {
@@ -464,7 +536,7 @@ func runAuthorizeChild(args []string) error {
 		return errors.New("invalid authorization helper arguments")
 	}
 	op, path := args[0], args[1]
-	socket := os.NewFile(3, "authorization-socket")
+	socket := os.NewFile(firstExtraFileDescriptor, "authorization-socket")
 	if socket == nil {
 		return errors.New("authorization socket is missing")
 	}
@@ -487,6 +559,15 @@ func runAuthorizeChild(args []string) error {
 			return err
 		}
 		files = append(files, destParent)
+	case "create":
+		if len(args) != 2 {
+			return errors.New("create authorization requires a path")
+		}
+		parent, err := openAuthorizedParent(path)
+		if err != nil {
+			return err
+		}
+		files = append(files, parent)
 	case "delete":
 		if len(args) != 2 {
 			return errors.New("delete authorization requires a path")

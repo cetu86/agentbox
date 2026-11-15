@@ -124,7 +124,7 @@ modprobe virtio_net 2>/dev/null || true
 ip link set eth0 up || fail "QEMU network interface eth0 is unavailable"
 udhcpc -n -q -t 10 -T 2 -i eth0 || fail "could not configure network for Alpine packages"
 mkdir -p /lib/apk/db
-apk --initdb add --no-cache bash btrfs-progs || fail "could not install Bash and btrfs tools"
+apk --initdb add --no-cache bash btrfs-progs coreutils || fail "could not install Bash, coreutils, and btrfs tools"
 modprobe btrfs || fail "could not load btrfs kernel module"
 
 disk=/dev/vda
@@ -160,6 +160,9 @@ export AGENTBOX_QEMU_DESTINATION=/mnt/test/allowed/snapshot
 export AGENTBOX_QEMU_PRIVATE_SOURCE=/mnt/test/private-source
 export AGENTBOX_QEMU_DENIED_DESTINATION=/mnt/test/allowed/denied-source
 export AGENTBOX_QEMU_PRIVATE_DESTINATION=/mnt/test/private-dest/denied-destination
+export AGENTBOX_QEMU_CREATE_PATH=/mnt/test/allowed/created-subvolume
+export AGENTBOX_QEMU_PRIVATE_CREATE_PATH=/mnt/test/private-dest/denied-subvolume
+export AGENTBOX_QEMU_PROJECT_PARENT=/mnt/test/allowed
 set +e
 su nobody -s /bin/bash -c 'exec /agentbox-integration.test -test.run "^TestQEMU" -test.v'
 test_status=$?
@@ -170,6 +173,7 @@ if [ "$test_status" -ne 0 ]; then
 fi
 [ ! -e /mnt/test/allowed/denied-source ] || fail "denied snapshot source created a destination"
 [ ! -e /mnt/test/private-dest/denied-destination ] || fail "denied snapshot destination was created"
+[ ! -e /mnt/test/private-dest/denied-subvolume ] || fail "denied subvolume creation left a destination"
 
 kill -TERM "$daemon_pid"
 wait "$daemon_pid" || fail "daemon did not shut down cleanly"

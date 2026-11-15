@@ -6,12 +6,15 @@ working tree and Git branch, while the original project remains untouched
 until you choose to bring the work back.
 
 The CLI can use Podman or Docker and builds an agent image from the embedded
-`Containerfile`. By default, agents run GitHub Copilot CLI with network access
-restricted through an allowlisting proxy.
+`Containerfile`. By default, agents run GitHub Copilot CLI with normal
+container network access and no proxy or domain filtering.
 
 ## Requirements
 
-- Linux with btrfs and `btrfs-progs`; the project must be a btrfs subvolume.
+- Linux with btrfs and `btrfs-progs`; the project must be on a btrfs
+  filesystem. Use `agentbox init --subvolume` to copy a regular project
+  directory into a subvolume; that migration also requires `cp` with
+  `--reflink=auto` support.
 - Go 1.22 or later to build the CLI.
 - Podman or Docker, configured for the current user.
 - A Git project.
@@ -27,15 +30,6 @@ Build the executable from this directory:
 go build -o agentbox .
 ```
 
-Run `agentbox init` from the project directory to create the default
-configuration at `$XDG_CONFIG_HOME/agentbox/config.json` (or the platform's
-user config directory). Review the generated file before building the image:
-
-```sh
-./agentbox init
-./agentbox build
-```
-
 Start the privileged btrfs companion daemon in a separate terminal (or
 configure it as a system service):
 
@@ -45,17 +39,41 @@ sudo ./agentbox daemon
 
 The daemon listens on `/run/agentbox/agentbox.sock`. The socket uses Unix
 peer credentials to identify each client. Local users can connect, but each
-request is authorized as that peer's UID and groups. For snapshots, the
-daemon verifies access to the source and create access to the destination's
-parent; for deletion, it verifies access to the target and delete access to
-its parent. It accepts only snapshot and subvolume-delete operations, not
-arbitrary commands or btrfs arguments. Keep the daemon running while using
-`agentbox`; stop it with Ctrl-C or SIGTERM.
+request is authorized as that peer's UID and groups. The daemon verifies
+access to snapshot sources and targets, and only creates subvolumes in a
+directory where the client has create access. It accepts only specific
+subvolume create, snapshot, and delete operations, not arbitrary commands or
+btrfs arguments. Keep the daemon running while using `agentbox`; stop it with
+Ctrl-C or SIGTERM.
+
+Initialize from the project directory. For an existing btrfs subvolume, run:
+
+```sh
+./agentbox init
+```
+
+For a regular directory on a btrfs filesystem, run `init --subvolume` instead
+of `init`. It copies the project into a sibling subvolume, switches it into
+place, and keeps the original at `.agentbox-init-*/original` for recovery.
+The copy may take time and needs enough free space; inspect the new project
+before removing the backup:
+
+```sh
+./agentbox init --subvolume
+```
+
+Review the generated config at `$XDG_CONFIG_HOME/agentbox/config.json` (or the
+platform's user config directory), then build the image:
+
+```sh
+./agentbox build
+```
 
 The default config uses Podman, the `agentbox:latest` image, and GitHub Copilot
-CLI. It stores snapshots in `.agent-snaps` next to the project. The snapshot
-directory must be on the same btrfs filesystem as the project. Change
-`"runtime"` to `"docker"` if you use Docker.
+CLI. (Change `"runtime"` to `"docker"` if you use Docker.)
+It stores snapshots in `.agent-snaps` next to the project. That directory
+must reside on the same btrfs filesystem as the project: if `.agent-snaps` is a
+separate mount, the mounted filesystem must be the project's btrfs filesystem.
 
 The `agent_cmd` array configures the command run in the container. The
 placeholder `{task}` is replaced with the task text:
@@ -73,16 +91,16 @@ Other useful configuration fields:
 | Field | Purpose |
 | --- | --- |
 | `project` | Absolute path to the host project. |
-| `snapshot_dir` | Directory for btrfs snapshots; keep it on the project's btrfs filesystem. |
+| `snapshot_dir` | Directory for btrfs snapshots; it must reside on the project's btrfs filesystem, including when it is a separate mount. |
 | `runtime` | `podman` or `docker`. |
 | `image` | Image used for agent and shell containers. |
-| `shm_size` | Container shared-memory size; the default is `1g`. |
+| `shm_size` | Maximum container shared-memory size; must be a finite size such as `8g` (Docker and Podman do not support unlimited); the default is `1g`. |
 | `mounts` | Extra `host:container[:opts]` volume mounts. `~/` paths are expanded. |
 | `env` | Names of host environment variables to pass through when set. The defaults include `GH_TOKEN` and `GITHUB_TOKEN`. |
-| `network` | `proxy` (default), `none`, or `open`. |
-| `allowed_domains` | Destination domains allowed by the proxy. |
-| `proxy_image` | Container image for the Squid allowlisting proxy. |
-| `egress_network` | Runtime network used by the proxy to reach outside networks. |
+| `network` | `open` (default; unrestricted container networking), `none`, or `proxy` (domain allowlist). |
+| `allowed_domains` | Destination domains allowed when `network` is `proxy`. |
+| `proxy_image` | Container image used when `network` is `proxy`. |
+| `egress_network` | Runtime network used by the proxy when `network` is `proxy`. |
 
 Do not put token values or other secrets in the config file. Configure
 credentials in the host environment and list only their variable names in
@@ -119,9 +137,25 @@ Useful follow-up commands:
 ./agentbox resume refactor-api "Continue by fixing the failing test"
 ```
 
-`resume` reuses an existing snapshot and does not create another branch.
-`shell` opens Bash in a running agent container, or starts a fresh container
-with Bash if the agent container is no longer running.
+`list` shows each session's branch, whether its working tree has uncommitted
+changes, and whether its container is running. Use it to find active work and
+check what is ready to accept.
+
+`shell` opens an interactive Bash in the agent's existing container. If that
+container has stopped, it starts a new shell container on the same snapshot,
+so you can inspect or edit the agent's files without starting the agent again.
+
+`path` prints the snapshot's host filesystem path. This is useful for opening
+the agent's working tree in a host editor, for example:
+
+```sh
+code "$(./agentbox path refactor-api)"
+```
+
+`resume` starts the configured agent again in a new container using the same
+snapshot and branch; it does not create another snapshot or branch. Pass a new
+task to continue or redirect the work. Use `shell` instead when you want an
+interactive terminal rather than the agent.
 
 When the work is ready, stop the container and choose how to bring it back:
 
@@ -158,9 +192,12 @@ To remove an agent container and snapshot without accepting the work:
 
 ## Network modes
 
-The default `proxy` mode attaches the agent container to an internal container
-network and routes HTTP(S) requests through Squid, which allows only the
-domains in `allowed_domains`. Start, stop, or inspect the proxy with:
+The default `open` mode gives the agent container normal runtime networking,
+with no proxy or domain filtering. To opt into `proxy` mode, set `network` to
+`proxy` in the config or pass `--net proxy`. It attaches the agent container to
+an internal container network and routes HTTP(S) requests through Squid, which
+allows only the domains in `allowed_domains`. Start, stop, or inspect the proxy
+with:
 
 ```sh
 ./agentbox proxy up
@@ -175,8 +212,7 @@ You can override the configured mode on a command:
 ./agentbox start --net open online-task "Work with unrestricted container networking"
 ```
 
-`none` disables container networking. `open` gives the container normal
-runtime networking and bypasses the allowlist. The proxy allowlist is a
+`none` disables container networking. The proxy allowlist is a
 domain-level restriction, not a complete security boundary. An agent has
 write access to its mounted snapshot; review its changes before accepting
 them, and only run agents and tool configurations you trust.
@@ -185,8 +221,8 @@ them, and only run agents and tool configurations you trust.
 
 The daemon integration suite boots a minimal Alpine Linux guest under QEMU,
 creates a real btrfs filesystem in a temporary virtual disk, and exercises
-snapshot, delete, denied-path, and unsupported-operation requests against the
-running daemon:
+subvolume creation and project migration, snapshot and delete, denied-path,
+and unsupported-operation requests against the running daemon:
 
 ```sh
 ./scripts/qemu-integration.sh
@@ -203,7 +239,7 @@ access on the first run and while the guest installs its packages.
 ## Command reference
 
 ```text
-agentbox init
+agentbox init [--subvolume]
 agentbox daemon
 agentbox build [--base IMAGE]
 agentbox start [--project DIR] [--net proxy|none|open] [--base REF] [--no-branch] NAME [TASK...]

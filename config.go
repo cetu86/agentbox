@@ -20,7 +20,7 @@ type Config struct {
 	Mounts      []string `json:"mounts"`    // extra "host:container[:opts]" mounts
 	Env         []string `json:"env"`       // host env vars passed through if set
 
-	// Network: "proxy" (internal network + allowlisting squid), "none", or "open".
+	// Network: "open" (normal runtime networking), "none", or "proxy" (allowlisting squid).
 	Network        string   `json:"network"`
 	AllowedDomains []string `json:"allowed_domains"`
 	ProxyImage     string   `json:"proxy_image"`
@@ -45,7 +45,7 @@ func defaultConfig(project string) *Config {
 		AgentCmd: []string{"copilot", "--allow-all-tools", "-i", "{task}"},
 		ShmSize:  "1g",
 		Env:      []string{"GH_TOKEN", "GITHUB_TOKEN"},
-		Network:  "proxy",
+		Network:  "open",
 		AllowedDomains: []string{
 			".github.com", ".githubcopilot.com", ".githubusercontent.com",
 			".npmjs.org", ".pypi.org", ".pythonhosted.org", ".golang.org",
@@ -72,6 +72,9 @@ func loadConfig() (*Config, error) {
 	}
 	if cfg.Project == "" || cfg.SnapshotDir == "" {
 		return nil, fmt.Errorf("%s: project and snapshot_dir are required", p)
+	}
+	if cfg.Network == "" {
+		cfg.Network = "open"
 	}
 	if cfg.EgressNetwork == "" {
 		cfg.EgressNetwork = "bridge"

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
@@ -34,6 +36,101 @@ func gitOut(dir string, args ...string) (string, error) {
 }
 
 func (c *Config) snapPath(name string) string { return filepath.Join(c.SnapshotDir, name) }
+
+func initializeProjectSubvolume(project string) (string, error) {
+	project, err := filepath.Abs(project)
+	if err != nil {
+		return "", err
+	}
+	project = filepath.Clean(project)
+	if project == string(filepath.Separator) {
+		return "", errors.New("refusing to convert the filesystem root into a project subvolume")
+	}
+	info, err := os.Lstat(project)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("project path %s must be a real directory", project)
+	}
+	parent := filepath.Dir(project)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return "", err
+	}
+	projectStat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", errors.New("could not inspect project filesystem")
+	}
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
+	if !ok || projectStat.Dev != parentStat.Dev {
+		return "", errors.New("project directory must not be a mount point")
+	}
+	projectRootID, err := btrfsRootID(project)
+	if err != nil {
+		return "", err
+	}
+	parentRootID, err := btrfsRootID(parent)
+	if err != nil {
+		return "", err
+	}
+	if projectRootID != parentRootID {
+		return "", fmt.Errorf("%s is already a btrfs subvolume", project)
+	}
+
+	stagingDir, err := os.MkdirTemp(parent, ".agentbox-init-")
+	if err != nil {
+		return "", fmt.Errorf("create project migration directory: %w", err)
+	}
+	subvolume := filepath.Join(stagingDir, "project")
+	removeStaging := func(cause error) error {
+		deleteErr := requestPrivileged(btrfsRequest{Op: "delete", Path: subvolume})
+		if deleteErr != nil {
+			deleteErr = fmt.Errorf("remove temporary project subvolume: %w", deleteErr)
+		}
+		removeErr := os.Remove(stagingDir)
+		if removeErr != nil {
+			removeErr = fmt.Errorf("remove project migration directory: %w", removeErr)
+		}
+		return errors.Join(cause, deleteErr, removeErr)
+	}
+	if err := requestPrivileged(btrfsRequest{Op: "create", Path: subvolume}); err != nil {
+		_ = os.Remove(stagingDir)
+		return "", err
+	}
+	copyCmd := exec.Command("cp", "-a", "--reflink=auto", "--",
+		project+string(filepath.Separator)+".", subvolume+string(filepath.Separator)+".")
+	if output, err := copyCmd.CombinedOutput(); err != nil {
+		return "", removeStaging(fmt.Errorf("copy project into btrfs subvolume: %w: %s", err, strings.TrimSpace(string(output))))
+	}
+
+	backup := filepath.Join(stagingDir, "original")
+	if err := os.Rename(project, backup); err != nil {
+		return "", removeStaging(fmt.Errorf("move original project to backup: %w", err))
+	}
+	if err := os.Rename(subvolume, project); err != nil {
+		rollbackErr := os.Rename(backup, project)
+		if rollbackErr != nil {
+			return "", fmt.Errorf("install btrfs project subvolume: %w; original project is preserved at %s: %v", err, backup, rollbackErr)
+		}
+		return "", removeStaging(fmt.Errorf("install btrfs project subvolume: %w", err))
+	}
+	return backup, nil
+}
+
+func btrfsRootID(path string) (string, error) {
+	cmd := exec.Command("btrfs", "inspect-internal", "rootid", path)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("check btrfs subvolume status for %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	rootID := strings.TrimSpace(string(output))
+	if rootID == "" {
+		return "", fmt.Errorf("btrfs returned an empty subvolume ID for %s", path)
+	}
+	return rootID, nil
+}
 
 func (c *Config) requireSnapshot(name string) (string, error) {
 	p := c.snapPath(name)

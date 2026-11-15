@@ -6,6 +6,45 @@ import (
 	"testing"
 )
 
+func TestChildFilesPathUsesExtraFileOrder(t *testing.T) {
+	first, err := os.CreateTemp(t.TempDir(), "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := os.CreateTemp(t.TempDir(), "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	files := childFiles{first, second}
+	for _, test := range []struct {
+		file *os.File
+		want string
+	}{
+		{file: first, want: "/proc/self/fd/3"},
+		{file: second, want: "/proc/self/fd/4"},
+	} {
+		got, err := files.path(test.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != test.want {
+			t.Errorf("path(%s) = %q, want %q", test.file.Name(), got, test.want)
+		}
+	}
+
+	unlisted, err := os.CreateTemp(t.TempDir(), "unlisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlisted.Close()
+	if _, err := files.path(unlisted); err == nil {
+		t.Fatal("path for a file absent from ExtraFiles should fail")
+	}
+}
+
 func TestOpenAuthorizedParentForSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snapshot")

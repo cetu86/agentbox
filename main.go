@@ -17,7 +17,7 @@ const usageText = `agentbox - throwaway agent containers on btrfs snapshots of y
 
 Usage: agentbox <command> [flags] [args]   (flags go before positional args)
 
-  init                       write default config (project = current dir)
+  init [--subvolume]         write config; --subvolume converts the current directory
   daemon                     run the privileged btrfs companion daemon
   build                      build the agent image from the embedded Containerfile
   start   <name> [task...]   snapshot, branch agent/<name>, run agent TUI in a container
@@ -45,7 +45,7 @@ func main() {
 	case "daemon":
 		err = cmdDaemon(args)
 	case "init":
-		err = cmdInit()
+		err = cmdInit(args)
 	case "build":
 		err = cmdBuild(args)
 	case "start":
@@ -105,16 +105,43 @@ func needName(rest []string) (string, error) {
 	return rest[0], nil
 }
 
-func cmdInit() error {
+func cmdInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	makeSubvolume := fs.Bool("subvolume", false, "copy the project into a btrfs subvolume and retain the original as a backup")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: agentbox init [--subvolume]")
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
+	}
+	config, err := configPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(config); err == nil {
+		return fmt.Errorf("%s already exists", config)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	var backup string
+	if *makeSubvolume {
+		backup, err = initializeProjectSubvolume(wd)
+		if err != nil {
+			return err
+		}
 	}
 	p, err := writeDefaultConfig(wd)
 	if err != nil {
 		return err
 	}
 	fmt.Println("wrote", p, "- review it, then run `agentbox build`")
+	if backup != "" {
+		fmt.Printf("project is now a btrfs subvolume; original files retained at %s\n", backup)
+	}
 	return nil
 }
 

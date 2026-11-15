@@ -51,10 +51,13 @@ be tested without invoking btrfs or a container runtime.
   shell command strings. Return operational errors to the caller rather than
   silently treating failures as success.
 - Keep privileged btrfs work inside `daemon.go`; never add a generic command
-  or unrestricted path operation to the daemon protocol.
+  or unrestricted path operation to the daemon protocol. Subvolume creation
+  must be limited to a parent directory the requesting user can write.
 - Snapshot creation and promotion affect user project data. Preserve their
   safety checks and rollback behavior, and avoid broad or irreversible
   filesystem operations.
+- `agentbox init --subvolume` migrates a regular project directory by copying
+  it to a new subvolume and retaining the original as a recovery backup.
 - Keep btrfs requirements, snapshot filesystem constraints, container mount
   behavior, and network-mode descriptions accurate in `README.md` when those
   behaviors change.
