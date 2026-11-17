@@ -196,6 +196,7 @@ Useful follow-up commands:
 ./agentbox watch refactor-api
 ./agentbox shell refactor-api
 ./agentbox path refactor-api
+./agentbox diff refactor-api
 ./agentbox resume refactor-api "Continue by fixing the failing test"
 ```
 
@@ -219,6 +220,11 @@ the agent's working tree in a host editor, for example:
 ```sh
 code "$(./agentbox path refactor-api)"
 ```
+
+`diff` shows the session's changes from the files present when it started,
+including committed, staged, unstaged, and untracked non-ignored files. It does
+not accept changes, stop the container, or modify the session, so you can review
+the diff and resume the same agent to request further changes.
 
 `resume` starts the configured agent again in a new container using the same
 snapshot and branch; it does not create another snapshot or branch. It removes
@@ -356,6 +362,7 @@ agentbox attach [--project DIR] NAME
 agentbox watch [--project DIR] NAME
 agentbox shell [--project DIR] [--net proxy|none|open] NAME
 agentbox path [--project DIR] NAME
+agentbox diff [--project DIR] NAME
 agentbox list [--project DIR]
 agentbox accept [--project DIR] [--promote] [--force] [--keep] NAME
 agentbox discard [--project DIR] NAME

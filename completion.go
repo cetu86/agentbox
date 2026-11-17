@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func cmdCompletion(args []string) error {
@@ -39,7 +40,7 @@ func completionCandidates(args []string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() && validName.MatchString(entry.Name()) {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), diffMetadataPrefix) && validName.MatchString(entry.Name()) {
 			fmt.Println(entry.Name())
 		}
 	}
@@ -54,7 +55,7 @@ _agentbox()
     local i token positional=0
     local -a commands flags
 
-    commands=(init configure config finish daemon build start resume attach watch shell path list accept discard proxy completion)
+    commands=(init configure config finish daemon build start resume attach watch shell path diff list accept discard proxy completion)
     if (( COMP_CWORD == 1 )); then
         COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )
         return
@@ -82,7 +83,7 @@ _agentbox()
         start) flags=(--project --net --base --no-branch) ;;
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;
-        attach|watch|path|list|ls) flags=(--project --net) ;;
+        attach|watch|path|diff|list|ls) flags=(--project --net) ;;
         accept) flags=(--project --net --promote --force --keep) ;;
         discard|rm) flags=(--project --net) ;;
         *) return ;;
@@ -115,7 +116,7 @@ _agentbox()
     if (( positional == 0 )); then
         case "$cmd" in
             proxy) COMPREPLY=( $(compgen -W "up down logs" -- "$cur") ) ;;
-            resume|attach|watch|shell|path|accept|discard|rm)
+            resume|attach|watch|shell|path|diff|accept|discard|rm)
                 COMPREPLY=( $(compgen -W "$(agentbox __complete sessions 2>/dev/null)" -- "$cur") )
                 ;;
         esac
@@ -148,6 +149,7 @@ _agentbox()
         'watch:follow agent output'
         'shell:open a shell in the agent container'
         'path:print the snapshot path'
+        'diff:show session changes without accepting them'
         'list:list agent snapshots'
         'accept:bring agent work back'
         'discard:remove an agent snapshot'
@@ -176,7 +178,7 @@ _agentbox()
         start) flags=(--project --net --base --no-branch) ;;
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;
-        attach|watch|path|list|ls) flags=(--project --net) ;;
+        attach|watch|path|diff|list|ls) flags=(--project --net) ;;
         accept) flags=(--project --net --promote --force --keep) ;;
         discard|rm) flags=(--project --net) ;;
         proxy) flags=(--project --net) ;;
@@ -223,7 +225,7 @@ _agentbox()
     done
     if (( positional == 0 )); then
         case "$cmd" in
-            resume|attach|watch|shell|path|accept|discard|rm)
+            resume|attach|watch|shell|path|diff|accept|discard|rm)
                 sessions=(${(f)"$(agentbox __complete sessions 2>/dev/null)"})
                 compadd -- $sessions
                 ;;

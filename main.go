@@ -25,6 +25,7 @@ Usage: agentbox <command> [flags] [args]   (flags go before positional args)
   watch   <name>             follow agent output without sending input
   shell   <name>             open Bash in the agent container or snapshot
   path    <name>             print snapshot path (e.g. goland $(agentbox path foo))
+  diff    <name>             show session changes without accepting them
   list                       show snapshots, branches, dirty state, running containers
   accept  <name>             bring work back: git fetch (default) or --promote
   discard <name>             stop container and delete the snapshot
@@ -68,6 +69,8 @@ func main() {
 		err = cmdWatch(args)
 	case "path":
 		err = cmdPath(args)
+	case "diff":
+		err = cmdDiff(args)
 	case "list", "ls":
 		err = cmdList(args)
 	case "accept":
@@ -162,8 +165,14 @@ func cmdFinish(args []string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if len(entries) > 0 {
-		return fmt.Errorf("project has %d entries in %s; accept or discard agent snapshots before finishing", len(entries), cfg.SnapshotDir)
+	sessionEntries := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), diffMetadataPrefix) {
+			sessionEntries++
+		}
+	}
+	if sessionEntries > 0 {
+		return fmt.Errorf("project has %d entries in %s; accept or discard agent snapshots before finishing", sessionEntries, cfg.SnapshotDir)
 	}
 
 	backup, err := finishProjectSubvolume(cfg.Project)
@@ -275,6 +284,9 @@ func cmdStart(args []string, create bool) error {
 		if snap, err = cfg.snapshot(name); err != nil {
 			return err
 		}
+		if err := recordDiffBaseline(snap); err != nil {
+			return fmt.Errorf("record session diff baseline: %w", err)
+		}
 		if !noBranch {
 			a := []string{"switch", "-c", "agent/" + name}
 			if base != "" {
@@ -373,6 +385,39 @@ func cmdPath(args []string) error {
 	return err
 }
 
+func cmdDiff(args []string) error {
+	cfg, rest, err := parse("diff", args, nil)
+	if err != nil {
+		return err
+	}
+	name, err := needName(rest)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: agentbox diff [--project DIR] NAME")
+	}
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid session name %q", name)
+	}
+	snap, err := cfg.requireSnapshot(name)
+	if err != nil {
+		return err
+	}
+	baseline, err := sessionDiffBaseline(cfg.SnapshotDir, name)
+	if err != nil {
+		return err
+	}
+	changed, err := showSnapshotDiff(snap, baseline, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		fmt.Println("No changes since the session started.")
+	}
+	return nil
+}
+
 func cmdList(args []string) error {
 	cfg, _, err := parse("list", args, nil)
 	if err != nil {
@@ -385,7 +430,7 @@ func cmdList(args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tBRANCH\tDIRTY\tCONTAINER")
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), diffMetadataPrefix) {
 			continue
 		}
 		p := cfg.snapPath(e.Name())

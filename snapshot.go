@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,12 +269,188 @@ func (c *Config) snapshot(name string) (string, error) {
 	return dst, requestPrivileged(btrfsRequest{Op: "snapshot", Source: c.Project, Path: dst})
 }
 
+const diffMetadataPrefix = ".agentbox-diff-"
+
+func diffMetadataDir(snapshotDir, name string) string {
+	return filepath.Join(snapshotDir, diffMetadataPrefix+name)
+}
+
+func recordDiffBaseline(dir string) (resultErr error) {
+	snapshotDir, name := filepath.Dir(dir), filepath.Base(dir)
+	if !validName.MatchString(name) {
+		return fmt.Errorf("invalid session name %q", name)
+	}
+	metadataDir := diffMetadataDir(snapshotDir, name)
+	if err := os.Mkdir(metadataDir, 0o700); err != nil {
+		return fmt.Errorf("create session diff metadata: %w", err)
+	}
+	defer func() {
+		if resultErr != nil {
+			if cleanupErr := os.RemoveAll(metadataDir); cleanupErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete session diff metadata: %w", cleanupErr))
+			}
+		}
+	}()
+
+	objectsDir := filepath.Join(metadataDir, "objects")
+	if err := os.MkdirAll(filepath.Join(objectsDir, "info"), 0o700); err != nil {
+		return fmt.Errorf("create session diff objects: %w", err)
+	}
+	repoObjects, err := sessionGitObjects(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(objectsDir, "info", "alternates"), []byte(repoObjects+"\n"), 0o600); err != nil {
+		return fmt.Errorf("configure session diff objects: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "agentbox-baseline-")
+	if err != nil {
+		return fmt.Errorf("create temporary Git index: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	tree, err := gitTreeWithEnvironment(dir, tempDir, map[string]string{"GIT_OBJECT_DIRECTORY": objectsDir})
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "tree"), []byte(tree+"\n"), 0o600); err != nil {
+		return fmt.Errorf("save session diff baseline: %w", err)
+	}
+	return nil
+}
+
+func sessionDiffBaseline(snapshotDir, name string) (string, error) {
+	baselineBytes, err := os.ReadFile(filepath.Join(diffMetadataDir(snapshotDir, name), "tree"))
+	if err == nil {
+		value := strings.TrimSpace(string(baselineBytes))
+		if !isGitObjectID(value) {
+			return "", fmt.Errorf("invalid diff baseline for session %q", name)
+		}
+		return value, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("session %q has no saved diff baseline; start a new session with this version of agentbox", name)
+	}
+	return "", fmt.Errorf("read diff baseline for session %q: %w", name, err)
+}
+
+func isGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func gitTreeWithEnvironment(dir, tempDir string, overrides map[string]string) (string, error) {
+	env := make(map[string]string, len(overrides)+1)
+	for key, value := range overrides {
+		env[key] = value
+	}
+	env["GIT_INDEX_FILE"] = filepath.Join(tempDir, "index")
+	for _, args := range [][]string{
+		{"read-tree", "HEAD"},
+		{"add", "-A"},
+	} {
+		if _, err := gitOutputWithEnvironment(dir, env, args...); err != nil {
+			return "", err
+		}
+	}
+	return gitOutputWithEnvironment(dir, env, "write-tree")
+}
+
+func gitOutputWithEnvironment(dir string, overrides map[string]string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if len(overrides) != 0 {
+		cmd.Env = environmentWithOverrides(os.Environ(), overrides)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func sessionGitObjects(dir string) (string, error) {
+	objectsDir, err := gitOut(dir, "rev-parse", "--git-path", "objects")
+	if err != nil {
+		return "", fmt.Errorf("locate session Git objects: %w", err)
+	}
+	if !filepath.IsAbs(objectsDir) {
+		objectsDir = filepath.Join(dir, objectsDir)
+	}
+	objectsDir, err = filepath.Abs(objectsDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve session Git object directory: %w", err)
+	}
+	return objectsDir, nil
+}
+
+func showSnapshotDiff(dir, baseline string, output io.Writer) (bool, error) {
+	if !isGitObjectID(baseline) {
+		return false, errors.New("invalid diff baseline object ID")
+	}
+	tempDir, err := os.MkdirTemp("", "agentbox-diff-")
+	if err != nil {
+		return false, fmt.Errorf("create temporary diff data: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	objectsDir := filepath.Join(tempDir, "objects")
+	if err := os.MkdirAll(filepath.Join(objectsDir, "info"), 0o700); err != nil {
+		return false, fmt.Errorf("create temporary Git object directory: %w", err)
+	}
+	repoObjects, err := sessionGitObjects(dir)
+	if err != nil {
+		return false, err
+	}
+	baselineObjects := filepath.Join(diffMetadataDir(filepath.Dir(dir), filepath.Base(dir)), "objects")
+	alternates := repoObjects + "\n" + baselineObjects + "\n"
+	if err := os.WriteFile(filepath.Join(objectsDir, "info", "alternates"), []byte(alternates), 0o600); err != nil {
+		return false, fmt.Errorf("configure temporary Git objects: %w", err)
+	}
+
+	env := map[string]string{"GIT_OBJECT_DIRECTORY": objectsDir}
+	currentTree, err := gitTreeWithEnvironment(dir, tempDir, env)
+	if err != nil {
+		return false, fmt.Errorf("snapshot current session files: %w", err)
+	}
+	if currentTree == baseline {
+		return false, nil
+	}
+
+	diffEnv := make(map[string]string, len(env)+1)
+	for key, value := range env {
+		diffEnv[key] = value
+	}
+	diffEnv["GIT_INDEX_FILE"] = filepath.Join(tempDir, "index")
+	cmd := exec.Command("git", "-C", dir, "diff", "--no-ext-diff", "--no-textconv", "--color=auto", baseline, currentTree, "--")
+	cmd.Env = environmentWithOverrides(os.Environ(), diffEnv)
+	cmd.Stdout, cmd.Stderr = output, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("show session diff: %w", err)
+	}
+	return true, nil
+}
+
 func (c *Config) deleteSnapshot(name string) error {
 	p, err := c.requireSnapshot(name)
 	if err != nil {
 		return err
 	}
-	return requestPrivileged(btrfsRequest{Op: "delete", Path: p})
+	if err := requestPrivileged(btrfsRequest{Op: "delete", Path: p}); err != nil {
+		return err
+	}
+	if validName.MatchString(name) {
+		if err := os.RemoveAll(diffMetadataDir(c.SnapshotDir, name)); err != nil {
+			return fmt.Errorf("remove session diff metadata: %w", err)
+		}
+	}
+	return nil
 }
 
 func isDirty(dir string) (bool, error) {
