@@ -12,7 +12,8 @@ import (
 
 const usageText = `agentbox - throwaway agent containers on btrfs snapshots of your working dir
 
-Usage: agentbox <command> [flags] [args]   (flags go before positional args)
+Usage: agentbox                            open the interactive TUI for this project
+       agentbox <command> [flags] [args]   (flags go before positional args)
 
   init [--subvolume]         register this project; --subvolume converts it
   configure [--project DIR]  interactively configure this project
@@ -27,7 +28,7 @@ Usage: agentbox <command> [flags] [args]   (flags go before positional args)
   path    <name>             print snapshot path (e.g. goland $(agentbox path foo))
   diff    <name>             show session changes without accepting them
   list                       show snapshots, branches, dirty state, running containers
-  accept  <name>             bring work back: git fetch (default) or --promote
+  accept  <name>             bring work back: git fetch (default), --merge or --promote
   discard <name>             stop container and delete the snapshot
   proxy   up|down|logs       manage the allowlist proxy
   completion <bash|zsh>      print shell completion setup
@@ -37,6 +38,13 @@ Common flags: --project DIR, --net proxy|none|open
 
 func main() {
 	if len(os.Args) < 2 {
+		if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+			if err := runTUI(); err != nil {
+				fmt.Fprintln(os.Stderr, "agentbox:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
 	}
@@ -132,17 +140,7 @@ func cmdInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateConfigForRegistration(wd); err != nil {
-		return err
-	}
-	var backup string
-	if *makeSubvolume {
-		backup, err = initializeProjectSubvolume(wd)
-		if err != nil {
-			return err
-		}
-	}
-	p, err := registerProject(wd)
+	p, backup, err := initProject(wd, *makeSubvolume)
 	if err != nil {
 		return err
 	}
@@ -197,7 +195,7 @@ func cmdFinish(args []string) error {
 	return nil
 }
 
-func cmdBuild(args []string) (retErr error) {
+func cmdBuild(args []string) error {
 	var base string
 	cfg, _, err := parse("build", args, func(fs *flag.FlagSet) {
 		fs.StringVar(&base, "base", "", "base image for built-in toolchains (match Playwright and host libc)")
@@ -205,6 +203,11 @@ func cmdBuild(args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	return cfg.buildImage(base)
+}
+
+// buildImage builds the agent image from the configured toolchains.
+func (cfg *Config) buildImage(base string) (retErr error) {
 	if err := validateToolchainConfig(cfg); err != nil {
 		return err
 	}
@@ -268,33 +271,12 @@ func cmdStart(args []string, create bool) error {
 	if err != nil {
 		return err
 	}
-	if create {
-		status, err := cfg.containerStatus(name)
-		if err != nil {
-			return err
-		}
-		if containerIsRunning(status) {
-			return fmt.Errorf("container for %q is already running; attach to it or choose another name", name)
-		}
-	}
 	task := strings.Join(rest[1:], " ")
 
 	var snap string
 	if create {
-		if snap, err = cfg.snapshot(name); err != nil {
+		if snap, err = cfg.createBox(name, base, noBranch); err != nil {
 			return err
-		}
-		if err := recordDiffBaseline(snap); err != nil {
-			return fmt.Errorf("record session diff baseline: %w", err)
-		}
-		if !noBranch {
-			a := []string{"switch", "-c", "agent/" + name}
-			if base != "" {
-				a = append(a, base)
-			}
-			if err := git(snap, a...); err != nil {
-				return err
-			}
 		}
 	} else if snap, err = cfg.requireSnapshot(name); err != nil {
 		return err
@@ -423,37 +405,32 @@ func cmdList(args []string) error {
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(cfg.SnapshotDir)
+	if _, err := os.Stat(cfg.SnapshotDir); err != nil {
+		return err
+	}
+	boxes, err := cfg.listBoxes()
 	if err != nil {
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tBRANCH\tDIRTY\tCONTAINER")
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), diffMetadataPrefix) {
-			continue
-		}
-		p := cfg.snapPath(e.Name())
-		branch, _ := gitOut(p, "rev-parse", "--abbrev-ref", "HEAD")
-		dirty, _ := isDirty(p)
-		status, err := cfg.containerStatus(e.Name())
-		if err != nil {
-			return err
-		}
+	for _, b := range boxes {
+		status := b.Status
 		if status == "" {
 			status = "none"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%v\t%s\n", e.Name(), branch, dirty, status)
+		fmt.Fprintf(w, "%s\t%s\t%v\t%s\n", b.Name, b.Branch, b.Dirty, status)
 	}
 	return w.Flush()
 }
 
 func cmdAccept(args []string) error {
-	var promote, force, keep bool
+	var opts acceptOptions
 	cfg, rest, err := parse("accept", args, func(fs *flag.FlagSet) {
-		fs.BoolVar(&promote, "promote", false, "swap the snapshot in as the project (keeps build artifacts)")
-		fs.BoolVar(&force, "force", false, "with --promote: allow a dirty project dir")
-		fs.BoolVar(&keep, "keep", false, "keep the snapshot afterwards")
+		fs.BoolVar(&opts.Promote, "promote", false, "swap the snapshot in as the project (keeps build artifacts)")
+		fs.BoolVar(&opts.Force, "force", false, "with --promote: allow a dirty project dir")
+		fs.BoolVar(&opts.Keep, "keep", false, "keep the snapshot afterwards")
+		fs.BoolVar(&opts.Merge, "merge", false, "git merge the fetched branch into the project's current branch")
 	})
 	if err != nil {
 		return err
@@ -462,44 +439,11 @@ func cmdAccept(args []string) error {
 	if err != nil {
 		return err
 	}
-	snap, err := cfg.requireSnapshot(name)
-	if err != nil {
-		return err
+	message, err := cfg.acceptBox(name, opts)
+	if message != "" {
+		fmt.Println(message)
 	}
-	status, err := cfg.containerStatus(name)
-	if err != nil {
-		return err
-	}
-	if containerIsRunning(status) {
-		return fmt.Errorf("container for %q is still running", name)
-	}
-
-	if promote {
-		backup, err := cfg.promote(name, force)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("promoted; previous project kept at %s (agentbox discard _pre-%s when happy)\n", backup, name)
-	} else {
-		branch, err := gitOut(snap, "rev-parse", "--abbrev-ref", "HEAD")
-		if err != nil {
-			return err
-		}
-		if err := commitIfDirty(snap, "agentbox: "+name); err != nil {
-			return err
-		}
-		if err := git(cfg.Project, "fetch", snap, branch+":"+branch); err != nil {
-			return err
-		}
-		fmt.Printf("fetched %s into %s; merge it with: git merge %s\n", branch, cfg.Project, branch)
-	}
-	if keep {
-		return nil
-	}
-	if err := cfg.removeStoppedContainer(name); err != nil {
-		return err
-	}
-	return cfg.deleteSnapshot(name)
+	return err
 }
 
 func cmdDiscard(args []string) error {
@@ -511,19 +455,7 @@ func cmdDiscard(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := cfg.requireSnapshot(name); err != nil {
-		return err
-	}
-	status, err := cfg.containerStatus(name)
-	if err != nil {
-		return err
-	}
-	if status != "" {
-		if err := run(cfg.Runtime, "rm", "-f", cfg.containerName(name)); err != nil {
-			return err
-		}
-	}
-	return cfg.deleteSnapshot(name)
+	return cfg.discardBox(name)
 }
 
 func cmdProxy(args []string) error {

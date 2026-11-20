@@ -42,10 +42,10 @@ func runRuntime(args []string) error {
 	case "ps":
 		return listContainers(state, args[1:])
 	case "attach":
-		if len(args) != 4 || args[1] != "--detach-keys" || args[2] != "ctrl-@,ctrl-q" {
-			return errors.New("usage: runtime attach --detach-keys ctrl-@,ctrl-q NAME")
+		if len(args) != 2 {
+			return errors.New("usage: runtime attach NAME")
 		}
-		return tmux(state, "attach-session", "-t", args[3])
+		return tmux(state, "attach-session", "-t", args[1])
 	case "logs":
 		return followLogs(state, args[1:])
 	case "exec":
@@ -268,7 +268,7 @@ func tmux(state string, args ...string) error {
 	}
 	conf := filepath.Join(confDir, "tmux.conf")
 	if _, err := os.Stat(conf); errors.Is(err, os.ErrNotExist) {
-		data := "set-option -g prefix C-Space\nunbind-key C-b\nbind-key C-q detach-client\nset-option -g status off\n"
+		data := "set-option -g status off\n"
 		if err := os.WriteFile(conf, []byte(data), 0o600); err != nil {
 			return err
 		}

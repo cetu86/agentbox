@@ -1,10 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,24 +16,86 @@ const (
 	intNet    = "agentbox-int" // internal network: no route out except via the proxy
 	proxyPort = "3128"
 
-	containerDetachKeys    = "ctrl-@,ctrl-q"
 	copilotBootstrapScript = `umask 077 && mkdir -p "$HOME/.copilot" && printf '%s' "$1" > "$HOME/.copilot/config.json" && shift && exec "$@"`
 )
 
 func (c *Config) containerName(name string) string { return "agentbox-" + name }
 
+// shellContainerName names the persistent shell of a box.
+func (c *Config) shellContainerName(name string) string { return c.containerName(name) + ".shell" }
+
 func (c *Config) containerStatus(name string) (string, error) {
-	filter := "name=^" + regexp.QuoteMeta(c.containerName(name)) + "$"
+	return c.statusOf(c.containerName(name))
+}
+
+func (c *Config) statusOf(container string) (string, error) {
+	filter := "name=^" + regexp.QuoteMeta(container) + "$"
 	out, err := output(c.Runtime, "ps", "-a", "--filter", filter, "--format", "{{.Status}}")
 	if err != nil {
-		return "", fmt.Errorf("inspect container state: %w", err)
+		return "", containerStatusError(c.Runtime, err)
 	}
 	return out, nil
+}
+
+func containerStatusError(runtime string, err error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || len(exitErr.Stderr) == 0 {
+		return fmt.Errorf("inspect container state: %w", err)
+	}
+
+	detail := strings.TrimSpace(string(exitErr.Stderr))
+	if filepath.Base(runtime) == "docker" && isDockerDaemonUnavailable(detail) {
+		return fmt.Errorf("inspect container state: Docker daemon is not reachable; start Docker and retry (%s): %w", detail, err)
+	}
+	return fmt.Errorf("inspect container state: %s: %w", detail, err)
+}
+
+func isDockerDaemonUnavailable(stderr string) bool {
+	stderr = strings.ToLower(stderr)
+	return strings.Contains(stderr, "failed to connect to the docker api") ||
+		strings.Contains(stderr, "cannot connect to the docker daemon") ||
+		strings.Contains(stderr, "is the docker daemon running")
 }
 
 func containerIsRunning(status string) bool {
 	status = strings.ToLower(strings.TrimSpace(status))
 	return status == "running" || strings.HasPrefix(status, "up ")
+}
+
+// ensureShell makes sure the box's persistent shell container is running on
+// its snapshot. A shell that already runs keeps its state.
+func (c *Config) ensureShell(name, snap string) error {
+	container := c.shellContainerName(name)
+	status, err := c.statusOf(container)
+	if err != nil {
+		return err
+	}
+	if containerIsRunning(status) {
+		return nil
+	}
+	if status != "" {
+		if err := run(c.Runtime, "rm", "-f", container); err != nil {
+			return err
+		}
+	}
+	args, err := c.containerArgsNamed(name, snap, []string{"bash"}, true, container)
+	if err != nil {
+		return err
+	}
+	return c.runContainerRuntime(args...)
+}
+
+// removeShell kills and removes the box's shell container, if there is one.
+func (c *Config) removeShell(name string) error {
+	container := c.shellContainerName(name)
+	status, err := c.statusOf(container)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return nil
+	}
+	return run(c.Runtime, "rm", "-f", container)
 }
 
 func (c *Config) removeStoppedContainer(name string) error {
@@ -71,8 +132,8 @@ func (c *Config) agentCommand(task string) []string {
 	return out
 }
 
-// launch starts a persistent agent container and attaches the current terminal.
-func (c *Config) launch(name, snap string, cmd []string) error {
+// startContainer starts a detached, persistent agent container.
+func (c *Config) startContainer(name, snap string, cmd []string) error {
 	if err := c.removeStoppedContainer(name); err != nil {
 		return err
 	}
@@ -80,24 +141,28 @@ func (c *Config) launch(name, snap string, cmd []string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.runContainerRuntime(args...); err != nil {
+	return c.runContainerRuntime(args...)
+}
+
+// launch starts a persistent agent container and attaches the current terminal.
+func (c *Config) launch(name, snap string, cmd []string) error {
+	if err := c.startContainer(name, snap, cmd); err != nil {
 		return err
 	}
 	return c.attachContainer(name)
 }
 
 func (c *Config) attachContainer(name string) error {
-	args := []string{"attach", "--detach-keys", containerDetachKeys, c.containerName(name)}
+	args := []string{"attach", c.containerName(name)}
 	fmt.Fprintln(os.Stderr, "+", c.Runtime, strings.Join(args, " "))
+	return c.attachSession(name)
+}
+
+func (c *Config) runAttachCommand(args []string) error {
 	cmd := exec.Command(c.Runtime, args...)
 	cmd.Stdin, cmd.Stdout = os.Stdin, os.Stdout
-	var stderr bytes.Buffer
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	err := cmd.Run()
-	if err != nil && strings.TrimSpace(stderr.String()) == "read escape sequence" {
-		return nil
-	}
-	return err
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func (c *Config) launchShell(name, snap string) error {
@@ -121,6 +186,12 @@ func (c *Config) runContainerRuntime(args ...string) error {
 // containerArgs configures a container with the snapshot mounted at the
 // project's original absolute path (keeps absolute paths in caches valid).
 func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([]string, error) {
+	return c.containerArgsNamed(name, snap, cmd, managed, c.containerName(name))
+}
+
+// containerArgsNamed is containerArgs for a managed container with an explicit
+// container name.
+func (c *Config) containerArgsNamed(name, snap string, cmd []string, managed bool, container string) ([]string, error) {
 	args := []string{
 		"run",
 		"--hostname", name,
@@ -146,7 +217,7 @@ func (c *Config) containerArgs(name, snap string, cmd []string, managed bool) ([
 		}, cmd...)
 	}
 	if managed {
-		args = append(args, "-d", "-i", "-t", "--name", c.containerName(name))
+		args = append(args, "-d", "-i", "-t", "--name", container)
 	} else {
 		args = append(args, "--rm", "-it")
 	}

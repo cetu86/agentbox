@@ -83,7 +83,7 @@ func TestQEMUWorkflow(t *testing.T) {
 	fmt.Println("QEMU workflow: respond and detach")
 	start.write(t, "approve staging\n")
 	start.waitFor(t, "DUMMY_AGENT_ANSWER=approve staging")
-	start.write(t, "\x00\x11")
+	start.write(t, "\x1b[21~")
 	start.waitExit(t)
 
 	fmt.Println("QEMU workflow: inspect, watch, and open shell")
@@ -111,7 +111,7 @@ func TestQEMUWorkflow(t *testing.T) {
 
 	fmt.Println("QEMU workflow: reattach and accept")
 	attach := startQEMUCommandPTY(t, project, "/agentbox", "attach", "interactive")
-	attach.waitFor(t, "+ /qemu/runtime attach --detach-keys "+containerDetachKeys+" agentbox-interactive")
+	attach.waitFor(t, "+ /qemu/runtime attach agentbox-interactive")
 	attach.write(t, "finish\n")
 	attach.waitFor(t, "DUMMY_AGENT_CONTINUING")
 	attach.waitExit(t)
@@ -259,10 +259,10 @@ func runQEMUContainerRuntimeWorkflow(t *testing.T, runtime string) {
 	start.waitFor(t, "DUMMY_AGENT_READY")
 	start.write(t, "approve staging\n")
 	start.waitFor(t, "DUMMY_AGENT_ANSWER=approve staging")
-	start.write(t, "\x1c\x11")
+	start.write(t, "\x1b[21~")
 	start.waitExit(t)
 	disconnected := startQEMUCommandPTY(t, project, "/agentbox", "attach", "interactive")
-	disconnected.waitFor(t, "+ "+runtime+" attach --detach-keys "+containerDetachKeys+" agentbox-interactive")
+	disconnected.waitFor(t, "+ "+runtime+" attach agentbox-interactive")
 	disconnected.disconnectClient(t)
 
 	if output := runQEMUCommandDir(t, project, "/agentbox", "list"); !strings.Contains(output, "interactive") || !strings.Contains(output, "Up ") {
@@ -287,7 +287,7 @@ func runQEMUContainerRuntimeWorkflow(t *testing.T, runtime string) {
 	shell.waitExit(t)
 
 	attach := startQEMUCommandPTY(t, project, "/agentbox", "attach", "interactive")
-	attach.waitFor(t, "+ "+runtime+" attach --detach-keys "+containerDetachKeys+" agentbox-interactive")
+	attach.waitFor(t, "+ "+runtime+" attach agentbox-interactive")
 	attach.write(t, "finish\n")
 	attach.waitFor(t, "DUMMY_AGENT_CONTINUING")
 	attach.waitExit(t)
@@ -527,6 +527,12 @@ func startQEMUCommandPTY(t *testing.T, dir, name string, args ...string) *ptyCom
 	if err != nil {
 		_ = unix.Close(masterFD)
 		t.Fatalf("open PTY slave: %v", err)
+	}
+	// A sized terminal makes agentbox use its framed attach UI.
+	if err := unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &unix.Winsize{Row: 40, Col: 120}); err != nil {
+		_ = slave.Close()
+		_ = unix.Close(masterFD)
+		t.Fatalf("set PTY size: %v", err)
 	}
 	termios, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
 	if err != nil {

@@ -1,12 +1,17 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 )
 
 func TestConfigMenuNavigatesAndSavesSelections(t *testing.T) {
@@ -216,4 +221,105 @@ func sendConfigMenuKey(t *testing.T, model configMenuModel, key tea.KeyType, run
 		t.Fatalf("menu update returned %T, want configMenuModel", updated)
 	}
 	return result
+}
+
+type menuEmulatorWriter struct {
+	mu  *sync.Mutex
+	emu *vt.Emulator
+}
+
+func (w menuEmulatorWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.emu.Write(p)
+}
+
+// The Bubble Tea renderer and x/ansi must agree on cursor argument order;
+// a mismatch leaves stale text on screen after navigation.
+func TestConfigMenuRendersWithoutStaleText(t *testing.T) {
+	const cols, rows = 80, 24
+	emu := vt.NewEmulator(cols, rows)
+	var emuMu sync.Mutex
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+
+	cfg := defaultConfig("/tmp/project")
+	applyConfigDefaults(cfg)
+	model := newConfigMenuModel(*cfg)
+	program := tea.NewProgram(model,
+		tea.WithAltScreen(),
+		tea.WithInput(inR),
+		tea.WithOutput(menuEmulatorWriter{mu: &emuMu, emu: emu}),
+		tea.WithoutSignals(),
+	)
+	done := make(chan struct{})
+	go func() {
+		program.Run()
+		close(done)
+	}()
+	defer func() {
+		program.Quit()
+		<-done
+	}()
+	program.Send(tea.WindowSizeMsg{Width: cols, Height: rows})
+	model.width, model.height = cols, rows
+
+	expected := func(m configMenuModel) string {
+		lines := strings.Split(strings.TrimRight(m.View(), "\n"), "\n")
+		for len(lines) < rows {
+			lines = append(lines, "")
+		}
+		for i := range lines {
+			lines[i] = strings.TrimRight(ansi.Strip(lines[i]), " ")
+		}
+		return strings.Join(lines, "\n")
+	}
+	actual := func() string {
+		emuMu.Lock()
+		defer emuMu.Unlock()
+		lines := strings.Split(emu.Render(), "\n")
+		for i := range lines {
+			lines[i] = strings.TrimRight(ansi.Strip(lines[i]), " ")
+		}
+		return strings.Join(lines, "\n")
+	}
+	waitForScreen := func(want string) {
+		t.Helper()
+		var got string
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if got = actual(); got == want {
+				return
+			}
+		}
+		t.Fatalf("screen mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+
+	waitForScreen(expected(model))
+	keys := []struct {
+		raw string
+		key tea.KeyType
+	}{
+		{"\r", tea.KeyEnter},
+		{"j", tea.KeyDown},
+		{"\x1b", tea.KeyEsc},
+		{"j", tea.KeyDown},
+		{"\r", tea.KeyEnter},
+		{"\r", tea.KeyEnter},
+		{"\x1b", tea.KeyEsc},
+		{"\x1b", tea.KeyEsc},
+	}
+	for _, step := range keys {
+		inW.WriteString(step.raw)
+		runes := []rune(nil)
+		if step.raw == "j" {
+			runes = []rune("j")
+			step.key = tea.KeyRunes
+		}
+		model = sendConfigMenuKey(t, model, step.key, runes...)
+		waitForScreen(expected(model))
+	}
 }

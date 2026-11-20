@@ -84,7 +84,7 @@ _agentbox()
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;
         attach|watch|path|diff|list|ls) flags=(--project --net) ;;
-        accept) flags=(--project --net --promote --force --keep) ;;
+        accept) flags=(--project --net --promote --force --keep --merge) ;;
         discard|rm) flags=(--project --net) ;;
         *) return ;;
     esac
@@ -108,7 +108,7 @@ _agentbox()
         token=${COMP_WORDS[i]}
         case "$token" in
             --project|--net|--base) ((i++)) ;;
-            --subvolume|--no-branch|--promote|--force|--keep) ;;
+            --subvolume|--no-branch|--promote|--force|--keep|--merge) ;;
             -*) ;;
             *) ((positional++)) ;;
         esac
@@ -179,7 +179,7 @@ _agentbox()
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;
         attach|watch|path|diff|list|ls) flags=(--project --net) ;;
-        accept) flags=(--project --net --promote --force --keep) ;;
+        accept) flags=(--project --net --promote --force --keep --merge) ;;
         discard|rm) flags=(--project --net) ;;
         proxy) flags=(--project --net) ;;
         *) return ;;
@@ -218,7 +218,7 @@ _agentbox()
         token=${words[i]}
         case "$token" in
             --project|--net|--base) ((i++)) ;;
-            --subvolume|--no-branch|--promote|--force|--keep) ;;
+            --subvolume|--no-branch|--promote|--force|--keep|--merge) ;;
             -*) ;;
             *) ((positional++)) ;;
         esac

@@ -15,7 +15,7 @@ container network access and no proxy or domain filtering.
   filesystem. Use `agentbox init --subvolume` to copy a regular project
   directory into a subvolume; that migration also requires `cp` with
   `--reflink=auto` support.
-- Go 1.22 or later to build the CLI.
+- Go 1.26 or later to build the CLI.
 - Podman or Docker, configured for the current user.
 - A Git project.
 - Root access to start the companion daemon.
@@ -60,8 +60,11 @@ For an existing btrfs subvolume, run:
 For a regular directory on a btrfs filesystem, run `init --subvolume` instead
 of `init`. It copies the project into a sibling subvolume, switches it into
 place, and keeps the original at `.agentbox-init-*/original` for recovery.
-The copy may take time and needs enough free space; inspect the new project
-before removing the backup:
+After it completes, change to the installed project directory before running
+other agentbox commands; the shell may still be located in the retained
+original. Agentbox refuses to initialize a directory inside a migration
+backup. The copy may take time and needs enough free space; inspect the new
+project before removing the backup:
 
 ```sh
 ./agentbox init --subvolume
@@ -165,6 +168,40 @@ provide Node.js and npm; agentbox adds its shared packages and Copilot CLI
 after building the custom base. `--base` cannot be combined with a custom base
 Containerfile.
 
+## Interactive TUI
+
+Run `agentbox` with no arguments in a terminal to open a project-scoped TUI
+that lists the project's agent boxes (name, state, branch, changes) and
+refreshes every two seconds. Select a box and press:
+
+| Key | Action |
+| --- | --- |
+| `enter` | attach to the agent (shell/detach buttons work as in `attach`) |
+| `n` | new box: asks for a name and an optional task, then starts and attaches |
+| `s` | open the box's persistent shell |
+| `v` | view the diff |
+| `a` | accept (fetch the branch, delete the snapshot) |
+| `m` | accept and `git merge` the branch into the checked-out branch |
+| `p` | accept by promoting the snapshot |
+| `d` | discard (asks for confirmation) |
+| `x` | stop the container |
+| `b` / `c` | build the image / open the configuration TUI |
+| `q` | quit |
+
+Accept, merge and promote are refused while the agent is running. Merging is
+always explicit and confirmed. It requires the branch to be checked out
+and its tracked files to be clean, and it runs `git merge --abort` if the merge
+conflicts; the box is then kept so you can resolve it by hand.
+
+In a directory that is not an agentbox project yet, the TUI starts a setup
+wizard instead. It checks for a Git repository with commits (offering
+`git init`; it never commits for you), a container runtime, a btrfs
+filesystem and the daemon, offers to convert a regular directory into a
+subvolume (the original is kept as a backup, and this needs
+`sudo agentbox daemon`), writes the default configuration (or opens the
+configuration TUI), offers to build the image, and then lands on the empty
+box list.
+
 ## Run an agent
 
 Start a new agent session with a unique, lowercase name and a task:
@@ -183,10 +220,27 @@ For the default Copilot command, agentbox seeds Copilot's temporary config with
 the project path in its `trustedFolders` list, so Copilot trusts the project on
 each launch without persisting its home directory.
 
-Detach from the agent without stopping it by pressing `Ctrl+Space`, then
-`Ctrl+Q`. Agentbox configures this sequence because Copilot uses Ctrl-P.
-You can close the terminal after detaching; the agent container continues
+On an interactive terminal the agent's terminal is shown inside a box with a
+titlebar. Detach from the agent without stopping it by clicking the `Detach`
+button in the top right corner of the titlebar or pressing `F10`. The box is drawn by
+agentbox itself, with no native libraries. The titlebar button needs mouse
+reporting, so select text with `Shift` held; mouse input is forwarded to the
+agent only when it asks for it, including drag and motion tracking and both
+the SGR and legacy encodings. Because the runtime does not replay what the
+agent printed before you attached, agentbox recovers the agent's terminal modes
+(alternate screen, mouse tracking) from the container log on every attach. If stdin or stdout is not a terminal, or the
+terminal is smaller than 20x5, the runtime's plain attach is used. You can
+close the terminal after detaching; the agent container continues
 running.
+
+The titlebar also has a `Shell` button (`F9`) left of `Detach`. It detaches the agent view and
+shows a Bash shell on the same snapshot instead; the button then reads `Agent`
+and switches back. The shell runs in its own persistent container
+(`agentbox-NAME.shell`), so switching back to the agent only detaches it:
+running commands and shell state are kept until you return. The shell is
+killed when the box ends (`accept` or `discard`, or when a new box with the
+same name is started). Exiting the shell with `exit` removes it and returns to
+the agent. Switching is not available with the plain attach fallback.
 
 Useful follow-up commands:
 
@@ -202,9 +256,11 @@ Useful follow-up commands:
 
 `list` shows each session's branch, whether its working tree has uncommitted
 changes, and the container state (running, exited, or none).
+It also requires the configured container runtime to be reachable; if not,
+agentbox reports the runtime error.
 
 `attach` reconnects your terminal to a running agent. You can interact with it
-and detach again with `Ctrl+Space`, then `Ctrl+Q`.
+and detach again with the titlebar button or `F10`.
 
 `watch` follows the agent's output without attaching stdin, so it is useful
 for watching progress from another terminal while someone else is attached.
@@ -251,6 +307,14 @@ caches) to become the project directory:
 
 ```sh
 ./agentbox accept --promote refactor-api
+```
+
+To fetch and also merge the branch into the project's checked-out branch,
+use `--merge` (it cannot be combined with `--promote`). A conflicting merge
+is aborted and the box is kept:
+
+```sh
+./agentbox accept --merge refactor-api
 ```
 
 Promotion refuses to replace a dirty project unless `--force` is supplied.
@@ -351,6 +415,7 @@ implemented in Go under `scripts/qemu/` and `qemu_workflow_test.go`.
 ## Command reference
 
 ```text
+agentbox                                  (TUI; needs a terminal)
 agentbox init [--subvolume]
 agentbox configure [--project DIR]
 agentbox finish [--project DIR]
@@ -364,7 +429,7 @@ agentbox shell [--project DIR] [--net proxy|none|open] NAME
 agentbox path [--project DIR] NAME
 agentbox diff [--project DIR] NAME
 agentbox list [--project DIR]
-agentbox accept [--project DIR] [--promote] [--force] [--keep] NAME
+agentbox accept [--project DIR] [--promote | --merge] [--force] [--keep] NAME
 agentbox discard [--project DIR] NAME
 agentbox proxy up|down|logs
 ```

@@ -72,6 +72,9 @@ func loadConfig() (*Config, error) {
 	return loadConfigFor("")
 }
 
+// errNoProject is returned when no registered project contains the directory.
+var errNoProject = errors.New("no project configured")
+
 func loadConfigFor(project string) (*Config, error) {
 	if project == "" {
 		cwd, err := os.Getwd()
@@ -93,7 +96,7 @@ func loadConfigFor(project string) (*Config, error) {
 			}
 			parent := filepath.Dir(dir)
 			if parent == dir {
-				return nil, fmt.Errorf("no project configured for %s; run `agentbox init` there or use --project DIR", project)
+				return nil, fmt.Errorf("%w for %s; run `agentbox init` there or use --project DIR", errNoProject, project)
 			}
 		}
 	}

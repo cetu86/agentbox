@@ -25,6 +25,45 @@ func TestContainerIsRunning(t *testing.T) {
 	}
 }
 
+func TestContainerStatusReportsUnavailableDockerDaemon(t *testing.T) {
+	dir := t.TempDir()
+	runtimePath := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' 'failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory' >&2\nexit 1\n"
+	if err := os.WriteFile(runtimePath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Runtime: runtimePath}
+	_, err := cfg.containerStatus("review")
+	if err == nil {
+		t.Fatal("expected unavailable Docker daemon error")
+	}
+	for _, want := range []string{"Docker daemon is not reachable", "start Docker and retry", "connect: no such file or directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("containerStatus error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestContainerStatusIncludesRuntimeErrorOutput(t *testing.T) {
+	dir := t.TempDir()
+	runtimePath := filepath.Join(dir, "runtime")
+	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nprintf '%s\\n' 'invalid filter' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Runtime: runtimePath}
+	_, err := cfg.containerStatus("review")
+	if err == nil {
+		t.Fatal("expected runtime error")
+	}
+	for _, want := range []string{"invalid filter", "exit status 1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("containerStatus error %q does not contain %q", err, want)
+		}
+	}
+}
+
 func TestContainerArgsManagedAgentKeepsInteractiveContainer(t *testing.T) {
 	cfg := &Config{
 		Project: "/project",
@@ -212,19 +251,6 @@ func TestRunContainerRuntimeUsesConfiguredTokenEnvironment(t *testing.T) {
 	}
 }
 
-func TestAttachContainerTreatsDetachSequenceAsSuccess(t *testing.T) {
-	dir := t.TempDir()
-	runtimePath := filepath.Join(dir, "runtime")
-	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nprintf 'read escape sequence\\n' >&2\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{Runtime: runtimePath}
-	if err := cfg.attachContainer("review"); err != nil {
-		t.Fatalf("detach sequence returned error: %v", err)
-	}
-}
-
 func TestAttachContainerPreservesOtherRuntimeErrors(t *testing.T) {
 	dir := t.TempDir()
 	runtimePath := filepath.Join(dir, "runtime")
@@ -245,4 +271,24 @@ func hasContainerEnvArg(args []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestShellContainerArgs(t *testing.T) {
+	cfg := &Config{Runtime: "podman", Project: "/work/proj", Image: "img", ShmSize: "1g", Network: "open"}
+	if got := cfg.shellContainerName("feat"); got != "agentbox-feat.shell" {
+		t.Fatalf("shell container name = %q", got)
+	}
+	args, err := cfg.containerArgsNamed("feat", "/snap/feat", []string{"bash"}, true, cfg.shellContainerName("feat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-d -i -t --name agentbox-feat.shell", "-v /snap/feat:/work/proj", "--hostname feat"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args %q missing %q", joined, want)
+		}
+	}
+	if args[len(args)-2] != "img" || args[len(args)-1] != "bash" {
+		t.Errorf("args should end with image and bash: %q", joined)
+	}
 }

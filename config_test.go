@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -312,6 +313,38 @@ func TestInitCreatesOneConfigPerProject(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "agentbox", "config.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected shared config file: %v", err)
+	}
+}
+
+func TestInitRefusesMigrationBackup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	backup := filepath.Join(t.TempDir(), ".agentbox-init-test", "original")
+	nested := filepath.Join(backup, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{nil, {"--subvolume"}} {
+		err := cmdInit(args)
+		if err == nil || !strings.Contains(err.Error(), backup) {
+			t.Fatalf("cmdInit(%v) error = %v, want migration-backup refusal containing %q", args, err, backup)
+		}
+	}
+	if _, err := initializeProjectSubvolume(nested); err == nil || !strings.Contains(err.Error(), backup) {
+		t.Fatalf("initializeProjectSubvolume error = %v, want migration-backup refusal containing %q", err, backup)
 	}
 }
 

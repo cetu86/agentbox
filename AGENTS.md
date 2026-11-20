@@ -2,9 +2,9 @@
 
 ## Project
 
-`agentbox` is a Go 1.22 CLI for managing per-agent btrfs snapshots and running
+`agentbox` is a Go 1.26+ CLI for managing per-agent btrfs snapshots and running
 coding agents inside Podman or Docker containers. `golang.org/x/sys` provides
-Linux syscall support.
+Linux syscall support. It is pure Go (no CGO).
 
 ## Layout
 
@@ -18,6 +18,20 @@ Linux syscall support.
   `scripts/qemu-integration.sh` inside the Alpine QEMU guest.
 - `container.go` builds agent container arguments and manages networking and
   the allowlisting proxy.
+- `attach_frame.go` implements the framed attach UI: the container's terminal
+  runs on a pty, is emulated with `charmbracelet/x/vt`, and is drawn in a box
+  with a titlebar holding a detach button and a shell/agent switch button
+  (F9). Detaching or switching kills the attach client, which leaves the
+  container running. The shell is a sibling container `agentbox-<name>.shell`
+  (see `ensureShell`/`removeShell` in `container.go`); `accept`, `discard`
+  and a new `start` remove it.
+- `box_ops.go` holds box operations shared by the CLI and the TUI (list,
+  create, accept incl. `--merge`, discard, diff, init) and `captureCommands`,
+  which redirects command echo/output so the TUI is not corrupted.
+- `tui.go` is the project-scoped bubbletea TUI (`agentbox` with no args);
+  interactive work (attach, build, configure) runs through `tea.Exec`.
+  `tui_wizard.go` is the first-run setup wizard; `wizardChoices` is pure and
+  tested via an injectable `projectProbe`.
 - `Containerfile` defines the agent image and is embedded by `main.go`; keep
   the embedded file and the build behavior in sync.
 

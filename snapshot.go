@@ -19,11 +19,17 @@ func run(name string, args ...string) error {
 }
 
 func runWithEnv(name string, overrides map[string]string, args ...string) error {
-	fmt.Fprintln(os.Stderr, "+", name, strings.Join(args, " "))
 	cmd := exec.Command(name, args...)
 	if len(overrides) != 0 {
 		cmd.Env = environmentWithOverrides(os.Environ(), overrides)
 	}
+	if capture := activeCapture.Load(); capture != nil {
+		// The TUI owns the terminal: collect the output instead of drawing over it.
+		fmt.Fprintln(capture, "+", name, strings.Join(args, " "))
+		cmd.Stdout, cmd.Stderr = capture, capture
+		return cmd.Run()
+	}
+	fmt.Fprintln(os.Stderr, "+", name, strings.Join(args, " "))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
@@ -58,12 +64,35 @@ func gitOut(dir string, args ...string) (string, error) {
 
 func (c *Config) snapPath(name string) string { return filepath.Join(c.SnapshotDir, name) }
 
+func rejectMigrationBackup(project string) error {
+	project, err := cleanProjectPath(project)
+	if err != nil {
+		return err
+	}
+	for current := project; ; current = filepath.Dir(current) {
+		if filepath.Base(current) == "original" &&
+			strings.HasPrefix(filepath.Base(filepath.Dir(current)), ".agentbox-init-") {
+			return fmt.Errorf(
+				"refusing to initialize %s inside agentbox migration backup %s; change to the installed project directory and run `agentbox init` there",
+				project, current,
+			)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+	}
+}
+
 func initializeProjectSubvolume(project string) (string, error) {
 	project, err := filepath.Abs(project)
 	if err != nil {
 		return "", err
 	}
 	project = filepath.Clean(project)
+	if err := rejectMigrationBackup(project); err != nil {
+		return "", err
+	}
 	if project == string(filepath.Separator) {
 		return "", errors.New("refusing to convert the filesystem root into a project subvolume")
 	}
