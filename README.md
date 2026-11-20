@@ -121,6 +121,7 @@ Other useful configuration fields:
 | `image` | Image used for agent and shell containers. |
 | `toolchains` | Optional list of toolchains to add to the agent image: `java`, `nodejs`, `go`, `rust`, `cpp`, and `custom` for a custom base Containerfile. |
 | `custom_containerfile` | Optional path used when `custom` is selected in `toolchains`. It builds a custom base image, then agentbox adds the selected built-in toolchains and its common agent setup. Relative paths are resolved from the project directory; the Containerfile's directory is its build context. |
+| `max_parallel` | Plan tasks whose agents run at the same time; the default is `3`. |
 | `shm_size` | Maximum container shared-memory size; must be a finite size such as `8g` (Docker and Podman do not support unlimited); the default is `1g`. |
 | `mounts` | Extra `host:container[:opts]` volume mounts. `~/` paths are expanded. |
 | `env` | Names of host environment variables to pass through when set. The defaults include `GH_TOKEN` and `GITHUB_TOKEN`. |
@@ -185,8 +186,26 @@ refreshes every two seconds. Select a box and press:
 | `p` | accept by promoting the snapshot |
 | `d` | discard (asks for confirmation) |
 | `x` | stop the container |
+| `P` | open the plan screen (see below) |
 | `b` / `c` | build the image / open the configuration TUI |
 | `q` | quit |
+
+The plan screen shows `.agentbox/plan.json` grouped by parallel wave, with each
+task's state, `⚡auto` flag and running agent. Keys: `r` start/pause the
+orchestrator (starts ready tasks up to `max_parallel`, collects finished
+ones), `⏎` attach to a task's agent, `v` its diff, `a` approve and merge into
+`plan/<name>`, `x` reject (feedback is sent back to the agent; empty feedback
+blocks the task), `d` mark done, `t` retry a blocked task, `u` toggle
+auto-approve (do this before starting; the task's work is then merged without
+your review), `f` merge the completed plan into the current branch after
+a diffstat confirmation.
+
+Without a plan, the plan screen offers `n` (describe a goal; a planner agent
+is started and attached), `⏎` (re-attach) and `c` (collect the plan after the
+planner reported done). The same from the CLI: `agentbox plan "goal"`, then
+`agentbox plan collect`. An invalid plan is sent back to the planner. Review
+the collected plan (`agentbox plan check`, or `u` to set auto-approve) before
+running it.
 
 Accept, merge and promote are refused while the agent is running. Merging is
 always explicit and confirmed. It requires the branch to be checked out
@@ -201,6 +220,57 @@ subvolume (the original is kept as a backup, and this needs
 `sudo agentbox daemon`), writes the default configuration (or opens the
 configuration TUI), offers to build the image, and then lands on the empty
 box list.
+
+## Plans: automated task orchestration
+
+A plan is a machine-readable task graph in `.agentbox/plan.json` (commit it).
+agentbox runs each task as its own box, starts independent tasks in parallel
+(up to `max_parallel`), and you sign off on every task.
+
+```json
+{
+  "name": "login",
+  "tasks": [
+    {"id": "tests", "title": "Login tests", "prompt": "Write failing tests for ..."},
+    {"id": "impl", "prompt": "Make the tests pass ...", "depends_on": ["tests"]},
+    {"id": "docs", "prompt": "Document the login flow ..."}
+  ]
+}
+```
+
+Fields: `name` and `id` are lowercase box-style names; `depends_on` lists task
+ids (no cycles); optional `title`, `net` (`proxy`, `none`, `open`) and
+`auto_approve`.
+
+Workflow:
+
+1. `agentbox plan "goal"` (or `n` on the TUI plan screen) starts a planner
+   agent that proposes the plan. Talk it through, then `agentbox plan collect`
+   validates and saves it. Invalid plans are sent back to the planner.
+2. Review the plan: `agentbox plan check`, or the TUI plan screen (`P`).
+   Press `u` on a task to auto-approve it: its work is then merged without
+   your review, so use it only for tasks you trust.
+3. `agentbox plan run` (or `r` in the TUI) starts every ready task, i.e. one
+   whose dependencies are all accepted. Each task box starts from the
+   integration branch `plan/<name>`, so it contains all approved work. Attach
+   to any task to supervise it (`agentbox attach <id>`, or `⏎` in the TUI).
+4. Agents are told to write a done marker (`.git/agentbox-done`) when they
+   finish, or a blocked marker with a reason. A task moves to review when its
+   marker appears. An agent that exits without a marker is flagged; mark it
+   done by hand (`agentbox plan done <id>`, `d`).
+5. `approve` merges the task into `plan/<name>`. If the merge conflicts, a
+   resolver agent is started once on the conflict; if it fails, the task is
+   blocked. `reject -m "feedback"` restarts the agent with your feedback;
+   without feedback the task is blocked. A blocked or failed task also blocks
+   its dependents until you `retry` it.
+6. When every task is accepted, `agentbox plan finish` (or `f`) merges
+   `plan/<name>` into your current branch after you confirm the diffstat.
+
+Verification is up to you: if a result needs testing, make "write the tests"
+its own task before the implementation and review those tests first. The
+state (`.agentbox/plan-state.json`) is git-ignored and survives restarts;
+Ctrl-C on `plan run` stops the loop without losing progress. The done marker
+is a request in the prompt, not a guarantee, hence the manual controls.
 
 ## Run an agent
 
@@ -431,6 +501,7 @@ agentbox diff [--project DIR] NAME
 agentbox list [--project DIR]
 agentbox accept [--project DIR] [--promote | --merge] [--force] [--keep] NAME
 agentbox discard [--project DIR] NAME
+agentbox plan ["GOAL" | new GOAL | collect | check | status | run [--once] | approve ID | reject ID [-m MSG] | done ID | retry ID | finish]
 agentbox proxy up|down|logs
 ```
 

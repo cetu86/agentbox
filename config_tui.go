@@ -210,6 +210,9 @@ func validateConfiguredValues(cfg *Config) error {
 	if strings.TrimSpace(cfg.ShmSize) == "" {
 		return errors.New("shared memory size must not be empty")
 	}
+	if cfg.MaxParallel < 1 {
+		return errors.New("max parallel agents must be a positive whole number")
+	}
 	if cfg.Network != "open" && cfg.Network != "none" && cfg.Network != "proxy" {
 		return fmt.Errorf("unsupported network mode %q", cfg.Network)
 	}

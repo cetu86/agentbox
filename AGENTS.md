@@ -31,7 +31,27 @@ Linux syscall support. It is pure Go (no CGO).
 - `tui.go` is the project-scoped bubbletea TUI (`agentbox` with no args);
   interactive work (attach, build, configure) runs through `tea.Exec`.
   `tui_wizard.go` is the first-run setup wizard; `wizardChoices` is pure and
-  tested via an injectable `projectProbe`.
+  tested via an injectable `projectProbe`. `tui_plan.go` is the plan screen
+  (`P`): it only reads plan files directly; every change goes through
+  `withPlan`, and `captureCommands` is mutex-serialized so background
+  orchestrator steps and user operations never share the capture slot.
+- `plan.go` is the orchestration plan model: `.agentbox/plan.json` (task DAG,
+  validated), the git-ignored `plan-state.json`, and the pure scheduler
+  (`readyTasks`, `levels`). See `docs/orchestration-plan.md` for the design.
+  `plan_ops.go` holds the git side: the `plan/<name>` integration branch,
+  task boxes started from it, and merges into it done in a temporary worktree
+  (the project's checkout is never touched).
+  `plan_run.go` builds the task prompt (with the done/blocked marker
+  protocol; markers live in `.git/` so they are never committed), reads the
+  markers, and starts/restarts a task's agent container.
+  `plan_resolve.go` stops/removes task boxes, integrates a task, starts the
+  merge-conflict resolver agent, and holds the `plan.lock` flock.
+  `plan_orch.go` is the orchestrator state machine (`step` = reconcile +
+  start ready tasks) behind the `planBackend` interface so it is tested with
+  a fake; `plan_cmd.go` is the `agentbox plan ...` CLI. `plan_planner.go` runs the
+  planner agent in a box named `planner`: it writes `plan.json` inside its
+  snapshot, and `collectPlan` validates it (invalid plans are sent back to a
+  restarted planner) before saving it into the project.
 - `Containerfile` defines the agent image and is embedded by `main.go`; keep
   the embedded file and the build behavior in sync.
 

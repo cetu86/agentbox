@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -103,6 +104,7 @@ func newConfigMenuModel(cfg Config) configMenuModel {
 					{key: "image", label: "Agent image"},
 					{key: "agent_cmd", label: "Agent command arguments", multiline: true},
 					{key: "shm_size", label: "Shared memory size"},
+					{key: "max_parallel", label: "Plan: max parallel agents"},
 				},
 			},
 			{
@@ -597,6 +599,8 @@ func configMenuFieldText(cfg Config, key string) string {
 		return strings.Join(cfg.AgentCmd, "\n")
 	case "shm_size":
 		return cfg.ShmSize
+	case "max_parallel":
+		return strconv.Itoa(cfg.MaxParallel)
 	case "mounts":
 		return strings.Join(cfg.Mounts, "\n")
 	case "env":
@@ -632,6 +636,12 @@ func setConfigMenuField(cfg *Config, key, value string) {
 		cfg.AgentCmd = configTextLines(value)
 	case "shm_size":
 		cfg.ShmSize = strings.TrimSpace(value)
+	case "max_parallel":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			n = -1 // rejected by validateConfiguredValues
+		}
+		cfg.MaxParallel = n
 	case "mounts":
 		cfg.Mounts = configTextLines(value)
 	case "env":

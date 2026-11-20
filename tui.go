@@ -37,6 +37,7 @@ const (
 	screenConfirm
 	screenView
 	screenWizard
+	screenPlan
 )
 
 type boxesMsg struct {
@@ -98,6 +99,25 @@ type tuiModel struct {
 	viewTitle string
 
 	wizard *wizard
+
+	// confirmBack and viewBack are the screens to return to after a
+	// confirmation or diff; they reset to the list.
+	confirmBack tuiScreen
+	viewBack    tuiScreen
+
+	plan          *plan
+	planSt        *planState
+	planErr       string
+	planLoaded    bool
+	planCursor    int
+	planRunning   bool
+	planStepping  bool
+	planNextStep  time.Time
+	planLastErr   string
+	planLog       []string
+	planFeedback  bool
+	planGoal      bool // the feedback input collects the planner's goal instead
+	feedbackInput textinput.Model
 }
 
 // funcExec adapts a function to tea.ExecCommand. The function gets the real
@@ -116,7 +136,10 @@ func newTUIModel(cfg *Config) tuiModel {
 	task := textinput.New()
 	task.Prompt = ""
 	task.Placeholder = "optional: what should the agent do?"
-	return tuiModel{cfg: cfg, nameInput: name, taskInput: task, width: 80, height: 24}
+	feedback := textinput.New()
+	feedback.Prompt = ""
+	feedback.Placeholder = "what should the agent change?"
+	return tuiModel{cfg: cfg, nameInput: name, taskInput: task, feedbackInput: feedback, width: 80, height: 24}
 }
 
 // runTUI starts the project TUI, or the setup wizard when the current
@@ -256,11 +279,30 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tickMsg:
-		if m.screen == screenList && m.busy == "" && !m.refreshing {
+		cmds := []tea.Cmd{tickCmd()}
+		if (m.screen == screenList || m.screen == screenPlan) && m.busy == "" && !m.refreshing {
 			m.refreshing = true
-			return m, tea.Batch(m.refreshCmd(), tickCmd())
+			cmds = append(cmds, m.refreshCmd())
 		}
-		return m, tickCmd()
+		if m.screen == screenPlan && m.busy == "" && !m.planStepping {
+			cmds = append(cmds, m.planLoadCmd())
+		}
+		if m.planRunning && !m.planStepping && m.busy == "" && time.Now().After(m.planNextStep) {
+			m.planStepping = true
+			cmds = append(cmds, m.planStepCmd())
+		}
+		return m, tea.Batch(cmds...)
+	case planLoadedMsg:
+		return m.applyPlanLoaded(msg), nil
+	case planStepMsg:
+		return m.applyPlanStep(msg)
+	case planFinishMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.setError(msg.err, "")
+			return m, nil
+		}
+		return m.openFinishConfirm(msg), nil
 	case boxesMsg:
 		return m.applyBoxes(msg), nil
 	case opDoneMsg:
@@ -268,13 +310,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshing = true
 		if msg.err != nil {
 			m.setError(msg.err, msg.log)
-			return m, m.refreshCmd()
+			return m, tea.Batch(m.refreshCmd(), m.planReloadIfOpen())
 		}
 		m.status, m.statusErr = msg.message, false
 		if msg.then != nil {
-			return m, tea.Batch(msg.then, m.refreshCmd())
+			return m, tea.Batch(msg.then, m.refreshCmd(), m.planReloadIfOpen())
 		}
-		return m, m.refreshCmd()
+		return m, tea.Batch(m.refreshCmd(), m.planReloadIfOpen())
 	case execDoneMsg:
 		m.refreshing = true
 		if msg.err != nil {
@@ -282,7 +324,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status, m.statusErr = msg.message, false
 		}
-		return m, m.refreshCmd()
+		return m, tea.Batch(m.refreshCmd(), m.planReloadIfOpen())
 	case viewLoadedMsg:
 		m.busy = ""
 		if msg.err != nil {
@@ -305,6 +347,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirm(msg)
 		case screenView:
 			return m.updateView(msg)
+		case screenPlan:
+			return m.updatePlan(msg)
 		default:
 			return m.updateList(msg)
 		}
@@ -381,6 +425,8 @@ func (m tuiModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 	case "n":
 		return m.openNew(), textinput.Blink
+	case "P":
+		return m.openPlan()
 	case "b":
 		return m, buildCmd(m.cfg)
 	case "c":
@@ -406,6 +452,7 @@ func (m tuiModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.attachCmd(box.Name, true)
 	case "v":
 		m.busy = "Loading diff of " + box.Name
+		m.viewBack = screenList
 		cfg := m.cfg
 		return m, func() tea.Msg {
 			text, changed, err := cfg.boxDiff(box.Name)
@@ -521,12 +568,12 @@ func (m tuiModel) askStop(box boxInfo) tuiModel {
 func (m tuiModel) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y", "enter":
-		m.screen = screenList
+		m.screen, m.confirmBack = m.confirmBack, screenList
 		m.busy = strings.TrimSuffix(strings.SplitN(m.confirm.title, "?", 2)[0], "?")
 		m.status = ""
 		return m, m.confirm.run()
 	case "n", "N", "esc", "q":
-		m.screen = screenList
+		m.screen, m.confirmBack = m.confirmBack, screenList
 	}
 	return m, nil
 }
@@ -625,7 +672,7 @@ func (m tuiModel) validateNewName(name string) error {
 func (m tuiModel) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "v", "enter":
-		m.screen = screenList
+		m.screen, m.viewBack = m.viewBack, screenList
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -710,6 +757,8 @@ func (m tuiModel) View() string {
 		return m.viewNew()
 	case m.screen == screenConfirm:
 		return m.viewConfirm()
+	case m.screen == screenPlan:
+		return m.viewPlan()
 	}
 	return m.viewList()
 }
@@ -773,7 +822,7 @@ func (m tuiModel) footer() []string {
 	keys := []string{
 		keyHint("⏎", "attach"), keyHint("n", "new"), keyHint("s", "shell"), keyHint("v", "diff"),
 		keyHint("a", "accept"), keyHint("m", "accept+merge"), keyHint("p", "promote"),
-		keyHint("d", "discard"), keyHint("x", "stop"), keyHint("b", "build image"),
+		keyHint("d", "discard"), keyHint("x", "stop"), keyHint("P", "plan"), keyHint("b", "build image"),
 		keyHint("c", "configure"), keyHint("r", "refresh"), keyHint("q", "quit"),
 	}
 	for _, line := range wrapKeys(keys, max(m.width-2, 10)) {
@@ -823,4 +872,12 @@ func shortPath(path string) string {
 		}
 	}
 	return path
+}
+
+// planReloadIfOpen refreshes the plan view after an operation changed it.
+func (m tuiModel) planReloadIfOpen() tea.Cmd {
+	if m.screen == screenPlan {
+		return m.planLoadCmd()
+	}
+	return nil
 }

@@ -26,6 +26,7 @@ type Config struct {
 	Mounts              []string `json:"mounts"`    // extra "host:container[:opts]" mounts
 	Env                 []string `json:"env"`       // host env vars passed through if set
 	GitHubToken         string   `json:"github_token,omitempty"`
+	MaxParallel         int      `json:"max_parallel"` // plan tasks running at once; default 3
 
 	// Network: "open" (normal runtime networking), "none", or "proxy" (allowlisting squid).
 	Network        string   `json:"network"`
@@ -64,7 +65,8 @@ func defaultConfig(project string) *Config {
 			".github.com", ".githubcopilot.com", ".githubusercontent.com",
 			".npmjs.org", ".pypi.org", ".pythonhosted.org", ".golang.org",
 		},
-		ProxyImage: "docker.io/ubuntu/squid:latest",
+		ProxyImage:  "docker.io/ubuntu/squid:latest",
+		MaxParallel: defaultMaxParallel,
 	}
 }
 
@@ -185,6 +187,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.ProxyImage == "" {
 		cfg.ProxyImage = defaults.ProxyImage
+	}
+	if cfg.MaxParallel == 0 {
+		cfg.MaxParallel = defaults.MaxParallel
 	}
 	if cfg.EgressNetwork == "" {
 		cfg.EgressNetwork = "bridge"

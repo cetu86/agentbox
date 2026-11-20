@@ -7,6 +7,8 @@
 
 # Local agent snapshots and QEMU artifacts
 /.agent-snaps/
+/.agentbox/plan-state.json
+/.agentbox/plan.lock
 *.qcow2
 *.qcow
 *.img

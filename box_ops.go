@@ -34,8 +34,13 @@ func (c *commandCapture) String() string {
 // terminal.
 var activeCapture atomic.Pointer[commandCapture]
 
+// captureMu serializes captures: the single active slot cannot hold two.
+var captureMu sync.Mutex
+
 // captureCommands runs fn with command output captured and returns it.
 func captureCommands(fn func() error) (string, error) {
+	captureMu.Lock()
+	defer captureMu.Unlock()
 	capture := &commandCapture{}
 	activeCapture.Store(capture)
 	defer activeCapture.Store(nil)

@@ -30,6 +30,7 @@ Usage: agentbox                            open the interactive TUI for this pro
   list                       show snapshots, branches, dirty state, running containers
   accept  <name>             bring work back: git fetch (default), --merge or --promote
   discard <name>             stop container and delete the snapshot
+  plan    <subcommand>       run a task plan with parallel agents (see: agentbox plan)
   proxy   up|down|logs       manage the allowlist proxy
   completion <bash|zsh>      print shell completion setup
 
@@ -85,6 +86,8 @@ func main() {
 		err = cmdAccept(args)
 	case "discard", "rm":
 		err = cmdDiscard(args)
+	case "plan":
+		err = cmdPlan(args)
 	case "proxy":
 		err = cmdProxy(args)
 	case "completion":
