@@ -269,8 +269,8 @@ func TestMouseLevelsAndEncoding(t *testing.T) {
 	if got := f.handleMouse(press, noop, noop); got != nil {
 		t.Fatalf("no tracking requested, got %q", got)
 	}
-	if got := f.syncMouse(); got != "" {
-		t.Fatalf("baseline sync = %q", got)
+	if got := f.syncMouse(); !strings.Contains(got, "\x1b[?1002h") {
+		t.Fatalf("baseline sync should request drags for selection: %q", got)
 	}
 
 	// Copilot-style: any-event tracking with SGR encoding.
@@ -311,5 +311,55 @@ func TestMouseLevelsAndEncoding(t *testing.T) {
 	rel.release = true
 	if got := f.handleMouse(rel, noop, noop); len(got) != 6 || got[3] != 32+3 {
 		t.Errorf("legacy release = %q", got)
+	}
+}
+
+func TestDragSelectionCopiesText(t *testing.T) {
+	f := newAttachFrame("agent", 40, 10)
+	f.write([]byte("hello world\r\nsecond line"))
+	var copied string
+	changed := 0
+	f.onSelect = func(s string) { copied = s }
+	f.onSelectionChange = func() { changed++ }
+	noop := func() {}
+
+	// Cell (0,0) of the container is at screen column 2, row 2.
+	f.handleMouse(mouseEvent{button: 0, x: 2, y: 2}, noop, noop)
+	f.handleMouse(mouseEvent{button: 32, x: 6, y: 2}, noop, noop)
+	f.handleMouse(mouseEvent{button: 0, x: 6, y: 2, release: true}, noop, noop)
+	if copied != "hello" {
+		t.Fatalf("copied %q, want hello", copied)
+	}
+	if changed == 0 {
+		t.Error("no redraw requested")
+	}
+	if !strings.Contains(f.render(true), "\x1b[7m") {
+		t.Error("selection is not highlighted")
+	}
+
+	// A multi-row selection joins the rows with newlines.
+	f.handleMouse(mouseEvent{button: 0, x: 8, y: 2}, noop, noop)
+	f.handleMouse(mouseEvent{button: 32, x: 5, y: 3}, noop, noop)
+	f.handleMouse(mouseEvent{button: 0, x: 5, y: 3, release: true}, noop, noop)
+	if copied != "world\nseco" {
+		t.Fatalf("copied %q", copied)
+	}
+
+	// A plain click selects nothing and clears the highlight.
+	copied = ""
+	f.handleMouse(mouseEvent{button: 0, x: 3, y: 4}, noop, noop)
+	f.handleMouse(mouseEvent{button: 0, x: 3, y: 4, release: true}, noop, noop)
+	if copied != "" || strings.Contains(f.render(true), "\x1b[7m") {
+		t.Errorf("click left a selection: %q", copied)
+	}
+}
+
+func TestContainerClipboardIsForwarded(t *testing.T) {
+	f := newAttachFrame("agent", 40, 10)
+	var got []string
+	f.onClipboard = func(s string) { got = append(got, s) }
+	f.write([]byte("\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07"))
+	if len(got) != 1 || got[0] != "\x1b]52;c;aGVsbG8=\x07" {
+		t.Fatalf("forwarded %q", got)
 	}
 }

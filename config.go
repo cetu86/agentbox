@@ -19,12 +19,14 @@ type Config struct {
 	SnapshotDir         string   `json:"snapshot_dir"` // must be on the same btrfs filesystem
 	Runtime             string   `json:"runtime"`      // "podman" or "docker"
 	Image               string   `json:"image"`
-	Toolchains          []string `json:"toolchains,omitempty"`
+	Toolchains          []string `json:"toolchains"`
+	PlaywrightVersion   string   `json:"playwright_version,omitempty"` // used by the playwright toolchain
 	CustomContainerfile string   `json:"custom_containerfile,omitempty"`
-	AgentCmd            []string `json:"agent_cmd"` // "{task}" is replaced with the task text
-	ShmSize             string   `json:"shm_size"`  // chrome needs a big /dev/shm
-	Mounts              []string `json:"mounts"`    // extra "host:container[:opts]" mounts
-	Env                 []string `json:"env"`       // host env vars passed through if set
+	AgentCmd            []string `json:"agent_cmd"`                 // "{task}" is replaced with the task text
+	ShmSize             string   `json:"shm_size"`                  // chrome needs a big /dev/shm
+	MountTemplates      []string `json:"mount_templates,omitempty"` // selected cache mount templates
+	Mounts              []string `json:"mounts"`                    // extra "host:container[:opts]" mounts
+	Env                 []string `json:"env"`                       // host env vars passed through if set
 	GitHubToken         string   `json:"github_token,omitempty"`
 	MaxParallel         int      `json:"max_parallel"` // plan tasks running at once; default 3
 
@@ -51,13 +53,14 @@ func configPath(project string) (string, error) {
 
 func defaultConfig(project string) *Config {
 	return &Config{
-		Project:     project,
-		SnapshotDir: filepath.Join(filepath.Dir(project), ".agent-snaps"),
-		Runtime:     "podman",
-		Image:       "agentbox:latest",
-		Toolchains:  []string{},
+		Project:           project,
+		SnapshotDir:       filepath.Join(filepath.Dir(project), ".agent-snaps"),
+		Runtime:           "podman",
+		Image:             "agentbox:latest",
+		Toolchains:        []string{playwrightToolchain},
+		PlaywrightVersion: defaultPlaywrightVersion,
 		// Verify the flags with `copilot --help`; swap in claude, codex, etc. as you like.
-		AgentCmd: []string{"copilot", "--allow-all-tools", "-i", "{task}"},
+		AgentCmd: []string{"copilot", "--allow-all", "-i", "{task}"},
 		ShmSize:  "1g",
 		Env:      []string{"GH_TOKEN", "GITHUB_TOKEN"},
 		Network:  "open",
@@ -169,6 +172,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.Toolchains == nil {
 		cfg.Toolchains = defaults.Toolchains
+	}
+	if cfg.PlaywrightVersion == "" {
+		cfg.PlaywrightVersion = defaults.PlaywrightVersion
 	}
 	if cfg.AgentCmd == nil {
 		cfg.AgentCmd = defaults.AgentCmd

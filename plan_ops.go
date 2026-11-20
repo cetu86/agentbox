@@ -161,6 +161,26 @@ func (c *Config) finishPlan(planName string) (string, error) {
 	return fmt.Sprintf("merged %s into %s", branch, current), nil
 }
 
+// finishAndCleanup merges the finished plan and then removes what the plan
+// left behind: the merged integration branch and the execution state. The
+// committed plan.json stays. Nothing is removed when the merge fails.
+func (c *Config) finishAndCleanup(planName string) (string, error) {
+	unlock, err := planLock(c.Project)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	msg, err := c.finishPlan(planName)
+	if err != nil {
+		return "", err
+	}
+	msg += "; " + c.deleteMergedBranch(planBranch(planName))
+	if err := os.Remove(planStatePath(c.Project)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		msg += fmt.Sprintf("; could not remove the plan state: %v", err)
+	}
+	return msg, nil
+}
+
 // planDiffStat summarizes the integration branch against the branch it will be
 // merged into, for the final review.
 func (c *Config) planDiffStat(planName string) (string, error) {

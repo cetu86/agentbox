@@ -176,6 +176,7 @@ func (c *Config) acceptBox(name string, o acceptOptions) (string, error) {
 				return "", fmt.Errorf("%w; %s is fetched into %s and the box %q was kept", err, branch, c.Project, name)
 			}
 			message = fmt.Sprintf("merged %s into %s", branch, current)
+			message += "; " + c.deleteMergedBranch(branch)
 		} else {
 			message = fmt.Sprintf("fetched %s into %s; merge it with: git merge %s", branch, c.Project, branch)
 		}
@@ -187,6 +188,15 @@ func (c *Config) acceptBox(name string, o acceptOptions) (string, error) {
 		return message, err
 	}
 	return message, c.deleteSnapshot(name)
+}
+
+// deleteMergedBranch removes a branch that was just merged. The safe delete
+// refuses an unmerged branch, so it cannot lose work. It describes the outcome.
+func (c *Config) deleteMergedBranch(branch string) string {
+	if err := git(c.Project, "branch", "-d", branch); err != nil {
+		return fmt.Sprintf("could not delete branch %s: %v", branch, err)
+	}
+	return "deleted branch " + branch
 }
 
 // mergePreflight checks that the project can take a merge and returns the

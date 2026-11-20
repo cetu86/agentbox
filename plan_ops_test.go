@@ -234,3 +234,75 @@ func TestFetchSnapshotBranchDetachedHead(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestFinishAndCleanupRemovesBranchAndState(t *testing.T) {
+	cfg, _ := planTestProject(t)
+	if _, err := cfg.ensurePlanBranch("demo"); err != nil {
+		t.Fatal(err)
+	}
+	snap := cloneBox(t, cfg.Project, "demo", "a")
+	commitTestFile(t, snap, "a-file.txt", "a\n", "a work")
+	branch, err := fetchSnapshotBranch(snap, cfg.Project, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.integrateBranch("demo", branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := savePlanState(cfg.Project, newPlanState()); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := cfg.finishAndCleanup("demo")
+	if err != nil || !strings.Contains(msg, "deleted branch plan/demo") {
+		t.Fatalf("finishAndCleanup = %q, %v", msg, err)
+	}
+	if branchExists(cfg.Project, "plan/demo") {
+		t.Error("integration branch was not deleted")
+	}
+	if _, err := os.Stat(planStatePath(cfg.Project)); !os.IsNotExist(err) {
+		t.Errorf("plan state still exists: %v", err)
+	}
+}
+
+func TestFinishAndCleanupKeepsEverythingOnFailure(t *testing.T) {
+	cfg, _ := planTestProject(t)
+	if _, err := cfg.ensurePlanBranch("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := savePlanState(cfg.Project, newPlanState()); err != nil {
+		t.Fatal(err)
+	}
+	writeDiffTestFile(t, cfg.Project, "a.txt", "dirty\n")
+	if _, err := cfg.finishAndCleanup("demo"); err == nil {
+		t.Fatal("expected error")
+	}
+	if !branchExists(cfg.Project, "plan/demo") {
+		t.Error("integration branch was deleted despite the failure")
+	}
+	if _, err := os.Stat(planStatePath(cfg.Project)); err != nil {
+		t.Errorf("plan state was removed: %v", err)
+	}
+}
+
+func TestDeleteMergedBranchRefusesUnmerged(t *testing.T) {
+	cfg, _ := planTestProject(t)
+	if _, err := cfg.ensurePlanBranch("demo"); err != nil {
+		t.Fatal(err)
+	}
+	snap := cloneBox(t, cfg.Project, "demo", "a")
+	commitTestFile(t, snap, "a-file.txt", "a\n", "a work")
+	branch, err := fetchSnapshotBranch(snap, cfg.Project, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg := cfg.deleteMergedBranch(branch); !strings.Contains(msg, "could not delete") || !branchExists(cfg.Project, branch) {
+		t.Fatalf("unmerged branch handled wrongly: %q", msg)
+	}
+	if err := git(cfg.Project, "merge", "--no-edit", branch); err != nil {
+		t.Fatal(err)
+	}
+	if msg := cfg.deleteMergedBranch(branch); !strings.Contains(msg, "deleted branch") || branchExists(cfg.Project, branch) {
+		t.Fatalf("merged branch not deleted: %q", msg)
+	}
+}

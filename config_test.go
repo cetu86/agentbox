@@ -18,9 +18,10 @@ func TestDefaultNetworkIsOpen(t *testing.T) {
 	}
 }
 
-func TestDefaultToolchainsAreEmpty(t *testing.T) {
-	if got := defaultConfig("/project").Toolchains; len(got) != 0 {
-		t.Fatalf("default toolchains = %#v, want none", got)
+func TestDefaultToolchainsIncludePlaywright(t *testing.T) {
+	cfg := defaultConfig("/project")
+	if len(cfg.Toolchains) != 1 || cfg.Toolchains[0] != playwrightToolchain || cfg.PlaywrightVersion != defaultPlaywrightVersion {
+		t.Fatalf("default toolchains = %#v version %q, want Playwright %s", cfg.Toolchains, cfg.PlaywrightVersion, defaultPlaywrightVersion)
 	}
 }
 

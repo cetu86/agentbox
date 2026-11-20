@@ -249,8 +249,11 @@ func configureCmd(cfg *Config) tea.Cmd {
 		if !saved {
 			return nil
 		}
-		_, err = saveConfig(&updated)
-		return err
+		if _, err = saveConfig(&updated); err != nil {
+			return err
+		}
+		*cfg = updated // keep the running TUI in sync with the saved file
+		return nil
 	}, "")
 }
 

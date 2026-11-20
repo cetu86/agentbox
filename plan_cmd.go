@@ -296,16 +296,21 @@ func cmdPlanFinish(args []string) error {
 	if err != nil {
 		return err
 	}
-	return cfg.withPlan(func(o *orchestrator) error {
+	var name string
+	if err := cfg.withPlan(func(o *orchestrator) error {
 		if !o.plan.isComplete(o.state) {
 			printPlanStatus(o)
 			return fmt.Errorf("plan %q is not complete: every task must be accepted first", o.plan.Name)
 		}
-		msg, err := cfg.finishPlan(o.plan.Name)
-		if err != nil {
-			return err
-		}
-		fmt.Println(msg)
+		name = o.plan.Name
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	msg, err := cfg.finishAndCleanup(name)
+	if err != nil {
+		return err
+	}
+	fmt.Println(msg)
+	return nil
 }

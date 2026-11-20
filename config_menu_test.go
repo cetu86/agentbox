@@ -164,12 +164,12 @@ func TestConfigMenuSelectsMultipleToolchains(t *testing.T) {
 	model = sendConfigMenuKey(t, model, tea.KeyRunes, ' ')
 	model = sendConfigMenuKey(t, model, tea.KeyEnter)
 
-	want := []string{"java", "nodejs"}
+	want := []string{"java", "nodejs", "playwright"}
 	if !reflect.DeepEqual(model.cfg.Toolchains, want) {
 		t.Fatalf("selected toolchains = %#v, want %#v", model.cfg.Toolchains, want)
 	}
-	if fields := model.visibleSectionFields(); len(fields) != 3 {
-		t.Fatalf("container fields without custom selection = %d, want 3", len(fields))
+	if fields := model.visibleSectionFields(); len(fields) != 5 {
+		t.Fatalf("container fields without custom selection = %d, want 5", len(fields))
 	}
 }
 
@@ -180,7 +180,7 @@ func TestConfigMenuShowsCustomContainerfileWhenSelected(t *testing.T) {
 	model := newConfigMenuModel(*cfg)
 	model.section = 2
 	fields := model.visibleSectionFields()
-	if len(fields) != 4 || fields[1].key != "custom_containerfile" {
+	if len(fields) != 5 || fields[1].key != "custom_containerfile" {
 		t.Fatalf("container fields with custom selection = %#v, want custom Containerfile field", fields)
 	}
 }
@@ -195,16 +195,16 @@ func TestConfigMenuCombinesCustomContainerfileWithBuiltinToolchain(t *testing.T)
 	updated, _ := model.beginEdit(model.sections[model.section].fields[0])
 	model = updated.(configMenuModel)
 	model = sendConfigMenuKey(t, model, tea.KeyRunes, ' ')
-	for range 5 {
+	for range 8 {
 		model = sendConfigMenuKey(t, model, tea.KeyDown)
 	}
 	model = sendConfigMenuKey(t, model, tea.KeyRunes, ' ')
 	model = sendConfigMenuKey(t, model, tea.KeyEnter)
-	if !reflect.DeepEqual(model.cfg.Toolchains, []string{"java", customToolchain}) {
+	if !reflect.DeepEqual(model.cfg.Toolchains, []string{"java", "playwright", customToolchain}) {
 		t.Fatalf("selected toolchains = %#v, want Java plus custom base", model.cfg.Toolchains)
 	}
 
-	model.sectionSelection = 1
+	model.sectionSelection = 2
 	model = sendConfigMenuKey(t, model, tea.KeyEnter)
 	model.input.SetValue("Containerfile.custom")
 	model = sendConfigMenuKey(t, model, tea.KeyEnter)

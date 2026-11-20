@@ -20,6 +20,7 @@ Usage: agentbox                            open the interactive TUI for this pro
   finish                     remove this project's config and restore a normal directory
   daemon                     run the privileged btrfs companion daemon
   build                      build the agent image from the configured Containerfile
+  versions                   show the tool versions resolved in the built image
   start   <name> [task...]   snapshot, branch agent/<name>, start and attach agent
   resume  <name> [task...]   restart agent on an existing snapshot and attach
   attach  <name>             reconnect to a running agent's interactive terminal
@@ -66,6 +67,8 @@ func main() {
 		err = cmdFinish(args)
 	case "build":
 		err = cmdBuild(args)
+	case "versions":
+		err = cmdVersions(args)
 	case "start":
 		err = cmdStart(args, true)
 	case "resume":
@@ -225,6 +228,9 @@ func (cfg *Config) buildImage(base string) (retErr error) {
 	defer os.RemoveAll(dir)
 
 	baseImage := base
+	if baseImage == "" && containsString(cfg.Toolchains, playwrightToolchain) {
+		baseImage = playwrightBaseImage(cfg.PlaywrightVersion)
+	}
 	if useCustomBase {
 		customFile, err := resolveCustomContainerfile(cfg)
 		if err != nil {

@@ -56,8 +56,10 @@ func runConfigForm(cfg *Config) (bool, error) {
 	image := cfg.Image
 	toolchains := cloneConfigStrings(cfg.Toolchains)
 	customContainerfile := cfg.CustomContainerfile
+	playwrightVersion := cfg.PlaywrightVersion
 	command := strings.Join(cfg.AgentCmd, "\n")
 	shmSize := cfg.ShmSize
+	mountTemplateSel := cloneConfigStrings(cfg.MountTemplates)
 	mounts := strings.Join(cfg.Mounts, "\n")
 	env := strings.Join(cfg.Env, "\n")
 	network := cfg.Network
@@ -102,13 +104,16 @@ func runConfigForm(cfg *Config) (bool, error) {
 		).Title("Agent"),
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
-				Title("Language toolchains (multiple selections are combined)").
+				Title("Toolchains and tools (multiple selections are combined)").
 				Options(
 					huh.NewOption("Java (OpenJDK 21)", "java"),
 					huh.NewOption("Node.js", "nodejs"),
 					huh.NewOption("Go", "go"),
 					huh.NewOption("Rust", "rust"),
 					huh.NewOption("C/C++ (GCC/G++, CMake, Ninja)", "cpp"),
+					huh.NewOption("Vim", "vim"),
+					huh.NewOption("less", "less"),
+					huh.NewOption("Playwright (browsers; version set separately)", playwrightToolchain),
 					huh.NewOption("Custom base Containerfile", customToolchain),
 				).
 				Value(&toolchains),
@@ -121,6 +126,19 @@ func runConfigForm(cfg *Config) (bool, error) {
 					return nil
 				}).
 				Value(&customContainerfile),
+			huh.NewInput().
+				Title("Playwright version (used when selected; must match your project's @playwright/test)").
+				Validate(func(value string) error {
+					if slices.Contains(toolchains, playwrightToolchain) && !playwrightVersionRe.MatchString(strings.TrimSpace(value)) {
+						return errors.New("playwright version must look like 1.49.0")
+					}
+					return nil
+				}).
+				Value(&playwrightVersion),
+			huh.NewMultiSelect[string]().
+				Title("Mount templates (host caches shared with the box; combined with the mounts below)").
+				Options(mountTemplateHuhOptions()...).
+				Value(&mountTemplateSel),
 			huh.NewText().
 				Title("Extra mounts (one host:container[:opts] mount per line)").
 				Value(&mounts),
@@ -175,8 +193,10 @@ func runConfigForm(cfg *Config) (bool, error) {
 	cfg.Image = strings.TrimSpace(image)
 	cfg.Toolchains = toolchains
 	cfg.CustomContainerfile = strings.TrimSpace(customContainerfile)
+	cfg.PlaywrightVersion = strings.TrimSpace(playwrightVersion)
 	cfg.AgentCmd = configTextLines(command)
 	cfg.ShmSize = strings.TrimSpace(shmSize)
+	cfg.MountTemplates = mountTemplateSel
 	cfg.Mounts = configTextLines(mounts)
 	cfg.Env = configTextLines(env)
 	cfg.Network = network

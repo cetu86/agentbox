@@ -55,7 +55,7 @@ _agentbox()
     local i token positional=0
     local -a commands flags
 
-    commands=(init configure config finish daemon build start resume attach watch shell path diff list accept discard proxy completion)
+    commands=(init configure config finish daemon build versions start resume attach watch shell path diff list accept discard proxy completion)
     if (( COMP_CWORD == 1 )); then
         COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )
         return
@@ -80,6 +80,7 @@ _agentbox()
         configure|config) flags=(--project) ;;
         finish) flags=(--project --net) ;;
         build) flags=(--project --net --base) ;;
+        versions) flags=(--project --net) ;;
         start) flags=(--project --net --base --no-branch) ;;
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;
@@ -143,6 +144,7 @@ _agentbox()
         'finish:remove this project config and restore a normal directory'
         'daemon:run the privileged btrfs companion daemon'
         'build:build the agent image'
+        'versions:show tool versions in the built image'
         'start:create a snapshot and start an agent'
         'resume:restart an agent on its snapshot'
         'attach:reconnect to a running agent'
@@ -175,6 +177,7 @@ _agentbox()
         configure|config) flags=(--project) ;;
         finish) flags=(--project --net) ;;
         build) flags=(--project --net --base) ;;
+        versions) flags=(--project --net) ;;
         start) flags=(--project --net --base --no-branch) ;;
         resume) flags=(--project --net) ;;
         shell) flags=(--project --net) ;;

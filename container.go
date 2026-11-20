@@ -226,7 +226,10 @@ func (c *Config) containerArgsNamed(name, snap string, cmd []string, managed boo
 	} else {
 		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	}
-	for _, m := range c.Mounts {
+	if err := c.ensureTemplateMountDirs(); err != nil {
+		return nil, err
+	}
+	for _, m := range c.effectiveMounts() {
 		args = append(args, "-v", expandHome(m))
 	}
 	if c.GitHubToken != "" {

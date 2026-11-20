@@ -388,7 +388,7 @@ func (m tuiModel) openFinishConfirm(msg planFinishMsg) tuiModel {
 		title: "Merge the finished plan?",
 		lines: lines,
 		run: func() tea.Cmd {
-			return opCmd(func() (string, error) { return cfg.finishPlan(name) }, nil)
+			return opCmd(func() (string, error) { return cfg.finishAndCleanup(name) }, nil)
 		},
 	}
 	return m

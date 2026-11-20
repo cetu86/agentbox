@@ -129,3 +129,86 @@ func TestCmdBuildUsesCustomBaseThenSelectedToolchains(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaywrightToolchainSelectsBaseImage(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	project := t.TempDir()
+	runtimePath := filepath.Join(t.TempDir(), "runtime")
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nprintf '%s\\n' CALL \"$@\" >> \"$AGENTBOX_RUNTIME_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBOX_RUNTIME_LOG", logPath)
+	cfg := defaultConfig(project)
+	cfg.Runtime = runtimePath
+	cfg.PlaywrightVersion = "1.57.0"
+	if _, err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdBuild([]string{"--project", project}); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "BASE=mcr.microsoft.com/playwright:v1.57.0-noble"; !strings.Contains(string(log), want) {
+		t.Errorf("runtime calls do not contain %q:\n%s", want, log)
+	}
+
+	cfg.Toolchains = []string{}
+	if _, err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdBuild([]string{"--project", project}); err != nil {
+		t.Fatal(err)
+	}
+	log, _ = os.ReadFile(logPath)
+	if strings.Contains(string(log), "BASE=") {
+		t.Errorf("build without the playwright toolchain must keep the default base:\n%s", log)
+	}
+}
+
+func TestValidatePlaywrightToolchain(t *testing.T) {
+	bad := Config{Toolchains: []string{playwrightToolchain}, PlaywrightVersion: "^1.49.0"}
+	if err := validateToolchainConfig(&bad); err == nil {
+		t.Error("expected an error for a non-exact Playwright version")
+	}
+	custom := Config{Toolchains: []string{playwrightToolchain, customToolchain}, CustomContainerfile: "x", PlaywrightVersion: "1.49.0"}
+	if err := validateToolchainConfig(&custom); err == nil {
+		t.Error("expected an error combining playwright with a custom base")
+	}
+	ok := Config{Toolchains: []string{playwrightToolchain}, PlaywrightVersion: "1.49.0"}
+	if err := validateToolchainConfig(&ok); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCmdVersionsRunsScriptInImage(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	project := t.TempDir()
+	runtimePath := filepath.Join(t.TempDir(), "runtime")
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+	if err := os.WriteFile(runtimePath, []byte("#!/bin/sh\nprintf '%s\\n' CALL \"$@\" >> \"$AGENTBOX_RUNTIME_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBOX_RUNTIME_LOG", logPath)
+	cfg := defaultConfig(project)
+	cfg.Runtime = runtimePath
+	cfg.Image = "agentbox:test"
+	if _, err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdVersions([]string{"--project", project}); err != nil {
+		t.Fatal(err)
+	}
+	log, _ := os.ReadFile(logPath)
+	for _, want := range []string{"run\n--rm\n--entrypoint\nsh\nagentbox:test\n-c\n", "node --version"} {
+		if !strings.Contains(string(log), want) {
+			t.Errorf("runtime calls do not contain %q:\n%s", want, log)
+		}
+	}
+}

@@ -89,10 +89,12 @@ to the menu. Use `agentbox config` as a shorter alias, or
 `agentbox configure --project DIR` to configure another registered project.
 Set `ACCESSIBLE=1` to use the screen-reader-friendly prompt mode instead of
 the full-screen menu.
-In **Container → Language toolchains**, use Space to select any combination of
+In **Container → Toolchains and tools**, use Space to select any combination of
 Java (OpenJDK 21), Node.js, Go, Rust, and C/C++ (GCC/G++, CMake, Ninja, GDB,
-and pkg-config). The image build installs all selected toolchains; selecting
-none keeps the existing Playwright-based image.
+and pkg-config), plus the Vim editor, the less pager and Playwright. The image
+build installs everything selected. Playwright (selected by default) builds on
+the official Playwright image with the browsers for the **Playwright version**
+you set; without it the image is a plain Ubuntu with Node.js.
 
 Each project's default config uses Podman, the `agentbox:latest` image, and
 GitHub Copilot CLI. (Change `"runtime"` to `"docker"` if you use Docker.)
@@ -104,7 +106,7 @@ The `agent_cmd` array configures the command run in the container. The
 placeholder `{task}` is replaced with the task text:
 
 ```json
-"agent_cmd": ["copilot", "--allow-all-tools", "-i", "{task}"]
+"agent_cmd": ["copilot", "--allow-all", "-i", "{task}"]
 ```
 
 Adjust the command and flags for your installed agent CLI. The default grants
@@ -119,10 +121,12 @@ Other useful configuration fields:
 | `snapshot_dir` | Directory for this project's btrfs snapshots; it must reside on the same btrfs filesystem, including when it is a separate mount. |
 | `runtime` | `podman` or `docker`. |
 | `image` | Image used for agent and shell containers. |
-| `toolchains` | Optional list of toolchains to add to the agent image: `java`, `nodejs`, `go`, `rust`, `cpp`, and `custom` for a custom base Containerfile. |
+| `toolchains` | Optional list of toolchains to add to the agent image: `java`, `nodejs`, `go`, `rust`, `cpp`, `vim`, `less`, `playwright`, and `custom` for a custom base Containerfile. Defaults to `["playwright"]`; an explicit `[]` selects none. |
+| `playwright_version` | Exact Playwright version (default `1.49.0`) used by the `playwright` toolchain to pick `mcr.microsoft.com/playwright:v<version>-noble`. It must equal the version your project resolves (pin `@playwright/test` without a caret), or Playwright will ask to download browsers. It cannot be combined with `custom`. |
 | `custom_containerfile` | Optional path used when `custom` is selected in `toolchains`. It builds a custom base image, then agentbox adds the selected built-in toolchains and its common agent setup. Relative paths are resolved from the project directory; the Containerfile's directory is its build context. |
 | `max_parallel` | Plan tasks whose agents run at the same time; the default is `3`. |
 | `shm_size` | Maximum container shared-memory size; must be a finite size such as `8g` (Docker and Podman do not support unlimited); the default is `1g`. |
+| `mount_templates` | Selected cache mount templates (`gradle`, `maven`, `npm`, `pip`) mapping host caches such as `~/.gradle/caches` into `/home/agent`; host directories are created if missing. Selectable in `agentbox config`. |
 | `mounts` | Extra `host:container[:opts]` volume mounts. `~/` paths are expanded. |
 | `env` | Names of host environment variables to pass through when set. The defaults include `GH_TOKEN` and `GITHUB_TOKEN`. |
 | `github_token` | Optional GitHub personal access token for Copilot. When set, it overrides host `GH_TOKEN` and `GITHUB_TOKEN` for agent and shell containers. |
@@ -154,13 +158,18 @@ the former subvolume at `.agentbox-finish-*/original` for recovery, and removes
 that project's config file. Inspect the new directory before manually deleting
 the retained backup subvolume.
 
-The built-in Containerfile defaults to a Playwright image. `agentbox build`
-adds the selected language toolchains to it. Use `--base` when building to
-select a compatible Playwright base image for your host:
+With the `playwright` toolchain, `agentbox build` uses the Playwright image for
+`playwright_version` as the base and adds the other selected toolchains to it.
+Use `--base` when building to override the base image for your host:
 
 ```sh
 ./agentbox build --base mcr.microsoft.com/playwright:v1.49.0-noble
 ```
+
+`agentbox versions` starts a throwaway container from the built image and prints
+the installed versions of git, Node.js, Copilot CLI, the language toolchains
+and the bundled Playwright browser revisions, next to the configured Playwright
+version.
 
 You may select `custom` together with built-in toolchains and enter a custom
 base Containerfile path in the TUI. Its build context is the directory
@@ -264,7 +273,8 @@ Workflow:
    without feedback the task is blocked. A blocked or failed task also blocks
    its dependents until you `retry` it.
 6. When every task is accepted, `agentbox plan finish` (or `f`) merges
-   `plan/<name>` into your current branch after you confirm the diffstat.
+   `plan/<name>` into your current branch after you confirm the diffstat, then deletes the merged `plan/<name>`
+   branch and the plan's execution state (`plan.json` stays).
 
 Verification is up to you: if a result needs testing, make "write the tests"
 its own task before the implementation and review those tests first. The
@@ -294,9 +304,14 @@ On an interactive terminal the agent's terminal is shown inside a box with a
 titlebar. Detach from the agent without stopping it by clicking the `Detach`
 button in the top right corner of the titlebar or pressing `F10`. The box is drawn by
 agentbox itself, with no native libraries. The titlebar button needs mouse
-reporting, so select text with `Shift` held; mouse input is forwarded to the
-agent only when it asks for it, including drag and motion tracking and both
-the SGR and legacy encodings. Because the runtime does not replay what the
+reporting. When the program in the box does not use the mouse (a plain shell),
+drag with the left button to select text: agentbox highlights it and copies it
+to your clipboard through the terminal (OSC 52; your terminal must allow it).
+Clipboard writes (OSC 52) that programs in the box make, such as Copilot's copy of a
+selection, are passed on to your terminal.
+Typing clears the highlight. Programs that do use the mouse get it forwarded,
+and `Shift` held while dragging still selects natively in most terminals, (drag and motion
+tracking and both SGR and legacy encodings are supported). Because the runtime does not replay what the
 agent printed before you attached, agentbox recovers the agent's terminal modes
 (alternate screen, mouse tracking) from the container log on every attach. If stdin or stdout is not a terminal, or the
 terminal is smaller than 20x5, the runtime's plain attach is used. You can
@@ -381,7 +396,8 @@ caches) to become the project directory:
 
 To fetch and also merge the branch into the project's checked-out branch,
 use `--merge` (it cannot be combined with `--promote`). A conflicting merge
-is aborted and the box is kept:
+is aborted and the box and branch are kept. After a successful merge the
+merged branch is deleted from the project:
 
 ```sh
 ./agentbox accept --merge refactor-api
@@ -491,6 +507,7 @@ agentbox configure [--project DIR]
 agentbox finish [--project DIR]
 agentbox daemon
 agentbox build [--base IMAGE]
+agentbox versions [--project DIR]         (tool versions resolved in the built image)
 agentbox start [--project DIR] [--net proxy|none|open] [--base REF] [--no-branch] NAME [TASK...]
 agentbox resume [--project DIR] [--net proxy|none|open] NAME [TASK...]
 agentbox attach [--project DIR] NAME

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
@@ -267,7 +269,20 @@ type attachFrame struct {
 	// switchLabel is the second titlebar button; empty when the frame has
 	// only one view.
 	switchLabel string
+
+	// Text selection, used while the container does not track the mouse.
+	// Positions are 0-based cells of the container's screen.
+	selecting         bool // left button is held
+	selActive         bool // a non-empty selection is highlighted
+	selStart, selEnd  cellPos
+	onSelect          func(text string) // called with the selected text on release
+	onSelectionChange func()
+	// onClipboard receives OSC 52 clipboard writes of the container, which
+	// the emulator would otherwise drop.
+	onClipboard func(seq string)
 }
+
+type cellPos struct{ x, y int }
 
 type frameOutcome int
 
@@ -312,6 +327,14 @@ func newAttachFrame(name string, cols, rows int) *attachFrame {
 		Title:       func(title string) { f.appTitle = sanitizeTitle(title) },
 		EnableMode:  func(mode ansi.Mode) { set(mode, true) },
 		DisableMode: func(mode ansi.Mode) { set(mode, false) },
+	})
+	f.emu.RegisterOscHandler(52, func(data []byte) bool {
+		// data is "52;<targets>;<base64>"; queries ("?") are not answered.
+		parts := strings.SplitN(string(data), ";", 3)
+		if len(parts) == 3 && parts[2] != "?" && f.onClipboard != nil {
+			f.onClipboard("\x1b]52;" + parts[1] + ";" + parts[2] + "\x07")
+		}
+		return true
 	})
 	return f
 }
@@ -373,7 +396,11 @@ func (f *attachFrame) handleMouse(ev mouseEvent, detach, switchView func()) []by
 		return nil
 	}
 	level := f.mouseLevel()
-	if level == 0 || ev.x < 2 || ev.x > f.cols-1 || ev.y < 2 || ev.y > f.rows-1 {
+	if level == 0 {
+		f.handleSelection(ev)
+		return nil
+	}
+	if ev.x < 2 || ev.x > f.cols-1 || ev.y < 2 || ev.y > f.rows-1 {
 		return nil
 	}
 	motion := ev.button&32 != 0 && ev.button&64 == 0
@@ -399,6 +426,122 @@ func (f *attachFrame) handleMouse(ev mouseEvent, detach, switchView func()) []by
 	return []byte{0x1b, '[', 'M', byte(32 + button), byte(32 + x), byte(32 + y)}
 }
 
+// handleSelection implements drag-to-select for containers that do not use
+// the mouse themselves. The caller holds f.mu.
+func (f *attachFrame) handleSelection(ev mouseEvent) {
+	if ev.button&(3|64|128) != 0 {
+		return
+	}
+	innerCols, innerRows := f.innerSize()
+	pos := cellPos{
+		x: min(max(ev.x-2, 0), innerCols-1),
+		y: min(max(ev.y-2, 0), innerRows-1),
+	}
+	motion := ev.button&32 != 0
+	switch {
+	case !ev.release && !motion:
+		changed := f.selActive
+		f.selecting, f.selActive = true, false
+		f.selStart, f.selEnd = pos, pos
+		if changed && f.onSelectionChange != nil {
+			f.onSelectionChange()
+		}
+	case motion && f.selecting:
+		f.selEnd = pos
+		f.selActive = f.selEnd != f.selStart
+		if f.onSelectionChange != nil {
+			f.onSelectionChange()
+		}
+	case ev.release && f.selecting:
+		f.selecting = false
+		f.selEnd = pos
+		f.selActive = f.selEnd != f.selStart
+		if f.selActive && f.onSelect != nil {
+			f.onSelect(f.selectedText())
+		}
+	}
+}
+
+// selectionRange orders the selection so that a precedes b.
+func (f *attachFrame) selectionRange() (a, b cellPos) {
+	a, b = f.selStart, f.selEnd
+	if b.y < a.y || (b.y == a.y && b.x < a.x) {
+		a, b = b, a
+	}
+	return a, b
+}
+
+// selectedText returns the selected cells as text, one line per row.
+func (f *attachFrame) selectedText() string {
+	a, b := f.selectionRange()
+	innerCols, _ := f.innerSize()
+	var lines []string
+	for y := a.y; y <= b.y; y++ {
+		x0, x1 := 0, innerCols-1
+		if y == a.y {
+			x0 = a.x
+		}
+		if y == b.y {
+			x1 = b.x
+		}
+		var line strings.Builder
+		for x := x0; x <= x1; x++ {
+			if c := f.emu.CellAt(x, y); c != nil && c.Width > 0 {
+				line.WriteString(c.Content)
+			} else if c == nil {
+				line.WriteByte(' ')
+			}
+		}
+		lines = append(lines, strings.TrimRight(line.String(), " "))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clearSelection drops the highlight, for instance when the user types.
+func (f *attachFrame) clearSelection() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.selActive && f.onSelectionChange != nil {
+		f.onSelectionChange()
+	}
+	f.selecting, f.selActive = false, false
+}
+
+// highlightedRow draws one row of the container's screen with the selected
+// cells in reverse video. The caller holds f.mu.
+func (f *attachFrame) highlightedRow(y int) string {
+	a, b := f.selectionRange()
+	innerCols, _ := f.innerSize()
+	x0, x1 := 0, innerCols-1
+	if y == a.y {
+		x0 = a.x
+	}
+	if y == b.y {
+		x1 = b.x
+	}
+	var line strings.Builder
+	for x := 0; x < innerCols; x++ {
+		c := f.emu.CellAt(x, y)
+		if c == nil {
+			line.WriteByte(' ')
+			continue
+		}
+		if c.Width == 0 {
+			continue
+		}
+		style := c.Style
+		if x >= x0 && x <= x1 {
+			style.Attrs ^= uv.AttrReverse
+		}
+		content := c.Content
+		if content == "" {
+			content = " "
+		}
+		line.WriteString(style.Styled(content))
+	}
+	return line.String()
+}
+
 // mouseLevel is the most detailed mouse tracking the container asked for:
 // 1000 for clicks, 1002 for drags, 1003 for all motion, 0 for none.
 func (f *attachFrame) mouseLevel() int {
@@ -420,7 +563,11 @@ func (f *attachFrame) mouseLevel() int {
 func (f *attachFrame) syncMouse() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	want := max(f.mouseLevel(), 1000)
+	// Drags are needed to select text when the container ignores the mouse.
+	want := f.mouseLevel()
+	if want == 0 {
+		want = 1002
+	}
 	if want == f.outerMouse {
 		return ""
 	}
@@ -489,6 +636,11 @@ func (f *attachFrame) render(full bool) string {
 		line := ""
 		if r < len(lines) {
 			line = lines[r]
+		}
+		if f.selActive {
+			if a, b := f.selectionRange(); r >= a.y && r <= b.y {
+				line = f.highlightedRow(r)
+			}
 		}
 		if !full && line == f.prev[r] {
 			continue
@@ -647,6 +799,18 @@ func runFramedAttach(cmd *exec.Cmd, opts frameOptions, cols, rows int) (outcome 
 	// Replies of the virtual terminal (cursor reports, attribute queries).
 	go func() { _, _ = io.Copy(ptmx, frame.emu) }()
 
+	frame.onSelectionChange = func() {
+		select {
+		case dirty <- struct{}{}:
+		default:
+		}
+	}
+	frame.onClipboard = paint
+	// Copy through the terminal (OSC 52); the selection stays highlighted.
+	frame.onSelect = func(text string) {
+		paint("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07")
+	}
+
 	// User input -> container.
 	filter := &inputFilter{
 		detach:     requestDetach,
@@ -660,6 +824,7 @@ func runFramedAttach(cmd *exec.Cmd, opts frameOptions, cols, rows int) (outcome 
 		var flushTimer <-chan time.Time
 		forward := func(b []byte) {
 			if len(b) > 0 {
+				frame.clearSelection()
 				_, _ = ptmx.Write(b)
 			}
 		}

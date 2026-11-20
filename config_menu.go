@@ -110,8 +110,10 @@ func newConfigMenuModel(cfg Config) configMenuModel {
 			{
 				title: "Container",
 				fields: []configMenuField{
-					{key: "toolchains", label: "Language toolchains", multiselect: true, options: toolchainMenuOptions()},
+					{key: "toolchains", label: "Toolchains and tools", multiselect: true, options: toolchainMenuOptions()},
+					{key: "playwright_version", label: "Playwright version"},
 					{key: "custom_containerfile", label: "Custom base Containerfile"},
+					{key: "mount_templates", label: "Mount templates", multiselect: true, options: mountTemplateMenuOptions()},
 					{key: "mounts", label: "Extra mounts", multiline: true},
 					{key: "env", label: "Environment variables", multiline: true},
 				},
@@ -416,12 +418,12 @@ func (m *configMenuModel) resizeTextArea() {
 
 func (m configMenuModel) visibleSectionFields() []configMenuField {
 	fields := m.sections[m.section].fields
-	if slices.Contains(m.cfg.Toolchains, customToolchain) {
-		return fields
-	}
 	visible := make([]configMenuField, 0, len(fields))
 	for _, field := range fields {
-		if field.key != "custom_containerfile" {
+		switch {
+		case field.key == "custom_containerfile" && !slices.Contains(m.cfg.Toolchains, customToolchain):
+		case field.key == "playwright_version" && !slices.Contains(m.cfg.Toolchains, playwrightToolchain):
+		default:
 			visible = append(visible, field)
 		}
 	}
@@ -556,6 +558,7 @@ func (m configMenuModel) View() string {
 func cloneConfig(cfg Config) Config {
 	cfg.Toolchains = cloneConfigStrings(cfg.Toolchains)
 	cfg.AgentCmd = cloneConfigStrings(cfg.AgentCmd)
+	cfg.MountTemplates = cloneConfigStrings(cfg.MountTemplates)
 	cfg.Mounts = cloneConfigStrings(cfg.Mounts)
 	cfg.Env = cloneConfigStrings(cfg.Env)
 	cfg.AllowedDomains = cloneConfigStrings(cfg.AllowedDomains)
@@ -575,6 +578,10 @@ func (m configMenuModel) writeMenuItem(b *strings.Builder, selected bool, label,
 	marker := "  "
 	if selected {
 		marker = "> "
+	}
+	if value == "" {
+		fmt.Fprintf(b, "%s%s\n", marker, clipConfigText(label, m.width-len(marker)-1))
+		return
 	}
 	available := m.width - 32
 	if available < 12 {
@@ -617,8 +624,12 @@ func configMenuFieldText(cfg Config, key string) string {
 		return cfg.GitHubToken
 	case "toolchains":
 		return strings.Join(cfg.Toolchains, "\n")
+	case "mount_templates":
+		return strings.Join(cfg.MountTemplates, "\n")
 	case "custom_containerfile":
 		return cfg.CustomContainerfile
+	case "playwright_version":
+		return cfg.PlaywrightVersion
 	default:
 		return ""
 	}
@@ -658,8 +669,12 @@ func setConfigMenuField(cfg *Config, key, value string) {
 		cfg.GitHubToken = strings.TrimSpace(value)
 	case "toolchains":
 		cfg.Toolchains = configTextLines(value)
+	case "mount_templates":
+		cfg.MountTemplates = configTextLines(value)
 	case "custom_containerfile":
 		cfg.CustomContainerfile = strings.TrimSpace(value)
+	case "playwright_version":
+		cfg.PlaywrightVersion = strings.TrimSpace(value)
 	}
 }
 
@@ -692,6 +707,17 @@ func configMenuFieldPreview(cfg Config, key string) string {
 			return "Not set"
 		}
 		return "Set in project config"
+	case "mount_templates":
+		if len(cfg.MountTemplates) == 0 {
+			return "(none)"
+		}
+		labels := make([]string, 0, len(cfg.MountTemplates))
+		for _, option := range mountTemplateMenuOptions() {
+			if slices.Contains(cfg.MountTemplates, option.value) {
+				labels = append(labels, option.value)
+			}
+		}
+		return strings.Join(labels, ", ")
 	case "toolchains":
 		if len(cfg.Toolchains) == 0 {
 			return "None (Playwright base)"
