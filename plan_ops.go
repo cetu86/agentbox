@@ -63,7 +63,45 @@ func (c *Config) createTaskBox(planName, taskID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := c.reclaimUntouchedTaskBox(branch, taskID); err != nil {
+		return "", err
+	}
 	return c.createBox(taskID, branch, false)
+}
+
+// reclaimUntouchedTaskBox removes a leftover box of a task that has not
+// started (for example from an interrupted start) so the task can start again.
+// A box with any work in it is left alone and still blocks the start.
+func (c *Config) reclaimUntouchedTaskBox(planBranch, taskID string) error {
+	snap, err := c.requireSnapshot(taskID)
+	if err != nil {
+		return nil
+	}
+	blocked := func(why string) error {
+		return fmt.Errorf("task %q has a leftover box at %s that %s; inspect it with `agentbox diff %s` or remove it with `agentbox discard %s`", taskID, snap, why, taskID, taskID)
+	}
+	status, err := c.containerStatus(taskID)
+	if err != nil {
+		return err
+	}
+	if containerIsRunning(status) {
+		return blocked("still has a running container")
+	}
+	dirty, err := isDirty(snap)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		return blocked("has uncommitted changes")
+	}
+	ahead, err := gitOut(snap, "rev-list", "--count", planBranch+"..HEAD")
+	if err != nil {
+		return blocked("is not on the plan branch")
+	}
+	if strings.TrimSpace(ahead) != "0" {
+		return blocked("has commits of its own")
+	}
+	return c.discardBox(taskID)
 }
 
 // fetchBoxBranch commits any uncommitted work in the box's snapshot and fetches

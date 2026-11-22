@@ -293,6 +293,11 @@ func (m tuiModel) planBoxAction(t planTask, diff bool) (tea.Model, tea.Cmd) {
 	if box.Running {
 		return m, m.attachCmd(box.Name, false)
 	}
+	if m.planSt.status(t.ID) == taskPending {
+		// A stopped box of a task that never started is a leftover; resuming it
+		// would run the agent without the task prompt.
+		return m.planNotice(t.ID + " has not been started by the plan (run it with r); its existing box is a leftover and will be replaced"), nil
+	}
 	m.confirmBack = screenPlan
 	return m.askResume(box), nil
 }

@@ -9,13 +9,13 @@ FROM ${BASE}
 USER root
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates curl \
+ && apt-get install -y git openssh-client ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # The Playwright images already ship Node.js; plain bases get Node.js 22.
 RUN command -v npm >/dev/null \
  || (curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-     && apt-get install -y --no-install-recommends nodejs \
+     && apt-get install -y nodejs \
      && rm -rf /var/lib/apt/lists/*)
 
 # Agent CLI (change for claude / codex / etc., and update agent_cmd in the config).

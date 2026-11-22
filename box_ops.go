@@ -104,19 +104,59 @@ func (c *Config) createBox(name, base string, noBranch bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := c.prepareBox(snap, name, base, noBranch); err != nil {
+		// Do not leave a half-created box behind: it would block every retry.
+		if rerr := c.deleteSnapshot(name); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("remove incomplete box: %w", rerr))
+		}
+		return "", err
+	}
+	return snap, nil
+}
+
+func (c *Config) prepareBox(snap, name, base string, noBranch bool) error {
 	if err := recordDiffBaseline(snap); err != nil {
-		return "", fmt.Errorf("record session diff baseline: %w", err)
+		return fmt.Errorf("record session diff baseline: %w", err)
 	}
 	if !noBranch {
 		a := []string{"switch", "-c", "agent/" + name}
 		if base != "" {
+			if err := removeUntrackedCollisions(snap, base); err != nil {
+				return err
+			}
 			a = append(a, base)
 		}
 		if err := git(snap, a...); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return snap, nil
+	return nil
+}
+
+// removeUntrackedCollisions deletes untracked (including ignored) files in the snapshot that the
+// base ref tracks (e.g. a plan.json the plan branch already committed), which
+// would otherwise make the branch switch abort. Only the snapshot's copy goes.
+func removeUntrackedCollisions(snap, base string) error {
+	out, err := gitOut(snap, "ls-files", "--others", "-z")
+	if err != nil || out == "" {
+		return err
+	}
+	tracked, err := gitOut(snap, "ls-tree", "-r", "--name-only", "-z", base)
+	if err != nil {
+		return err
+	}
+	in := map[string]bool{}
+	for _, p := range strings.Split(tracked, "\x00") {
+		in[p] = true
+	}
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" && in[p] {
+			if err := os.Remove(filepath.Join(snap, p)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type acceptOptions struct {

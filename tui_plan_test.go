@@ -156,6 +156,11 @@ func TestPlanBoxActionNeedsBox(t *testing.T) {
 		t.Fatalf("attach without box: cmd=%v status=%q", cmd, next.status)
 	}
 	m.boxes = []boxInfo{{Name: "a", Status: "exited"}}
+	next, cmd = press(t, m, "enter")
+	if cmd != nil || next.screen == screenConfirm {
+		t.Fatalf("leftover box of an unstarted task must not be resumed: screen=%v", next.screen)
+	}
+	m.planSt.set("a", taskRunning, time.Time{})
 	next, _ = press(t, m, "enter")
 	if next.screen != screenConfirm || next.confirmBack != screenPlan {
 		t.Fatalf("resume prompt: screen=%v back=%v", next.screen, next.confirmBack)

@@ -1,4 +1,6 @@
-# Node.js and npm from the selected Debian/Ubuntu base image.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends nodejs npm \
- && rm -rf /var/lib/apt/lists/*
+# Node.js and npm. The base image already ships them, so this only installs
+# the distro packages when npm is missing (they conflict with NodeSource's nodejs).
+RUN command -v npm >/dev/null \
+ || (apt-get update \
+     && apt-get install -y nodejs npm \
+     && rm -rf /var/lib/apt/lists/*)

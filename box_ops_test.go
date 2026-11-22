@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,5 +132,38 @@ func TestCaptureCommandsCollectsOutput(t *testing.T) {
 	out, err = captureCommands(func() error { return run("sh", "-c", "echo bad >&2; exit 3") })
 	if err == nil || !strings.Contains(out, "bad") {
 		t.Fatalf("failing command: err = %v, output %q", err, out)
+	}
+}
+
+func TestRemoveUntrackedCollisions(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(dir, "a"), []byte("1"), 0o644)
+	run("add", "a")
+	run("commit", "-qm", "a")
+	run("switch", "-qc", "plan")
+	os.MkdirAll(filepath.Join(dir, ".agentbox"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".agentbox/plan.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".agentbox/plan.lock"), []byte("l"), 0o644)
+	run("add", ".agentbox/plan.json")
+	run("add", "-f", ".agentbox/plan.lock")
+	run("commit", "-qm", "plan")
+	run("switch", "-q", "main")
+	os.WriteFile(filepath.Join(dir, ".agentbox/plan.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(dir, "keep"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".git/info/exclude"), []byte(".agentbox/plan.lock\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".agentbox/plan.lock"), []byte("l"), 0o644)
+	if err := removeUntrackedCollisions(dir, "plan"); err != nil {
+		t.Fatal(err)
+	}
+	run("switch", "-c", "agent/x", "plan")
+	if _, err := os.Stat(filepath.Join(dir, "keep")); err != nil {
+		t.Fatal("unrelated untracked file removed")
 	}
 }
