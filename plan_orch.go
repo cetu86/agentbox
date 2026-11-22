@@ -271,9 +271,9 @@ func (o *orchestrator) reject(id, feedback string) error {
 }
 
 // markDone is the manual substitute for the done marker, e.g. when the agent
-// exited without writing it.
+// exited without writing it, or to overrule a task the agent reported blocked.
 func (o *orchestrator) markDone(id string) error {
-	t, err := o.requireStatus(id, taskRunning, taskConflict)
+	t, err := o.requireStatus(id, taskRunning, taskConflict, taskBlocked)
 	if err != nil {
 		return err
 	}

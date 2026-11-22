@@ -204,6 +204,17 @@ func TestStoppedAgentIsFlaggedOnce(t *testing.T) {
 	}
 }
 
+func TestMarkDoneOverrulesBlocked(t *testing.T) {
+	o, _ := newTestOrch(t, 3)
+	o.setStatus("a", taskBlocked, "unsure")
+	if err := o.markDone("a"); err != nil {
+		t.Fatal(err)
+	}
+	if o.state.status("a") != taskReview {
+		t.Fatalf("status = %s", o.state.status("a"))
+	}
+}
+
 func inReview(t *testing.T, o *orchestrator, f *fakeBackend, id string) {
 	t.Helper()
 	o.setStatus(id, taskRunning, "")

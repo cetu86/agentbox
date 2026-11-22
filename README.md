@@ -204,7 +204,7 @@ task's state, `⚡auto` flag and running agent. Keys: `r` start/pause the
 orchestrator (starts ready tasks up to `max_parallel`, collects finished
 ones), `⏎` attach to a task's agent, `v` its diff, `a` approve and merge into
 `plan/<name>`, `x` reject (feedback is sent back to the agent; empty feedback
-blocks the task), `d` mark done, `t` retry a blocked task, `u` toggle
+blocks the task), `d` mark done (also overrules a blocked task), `t` retry a blocked task, `u` toggle
 auto-approve (do this before starting; the task's work is then merged without
 your review), `f` merge the completed plan into the current branch after
 a diffstat confirmation.

@@ -214,8 +214,8 @@ func (m tuiModel) updatePlan(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.feedbackInput.Focus()
 		return m, textinput.Blink
 	case "d":
-		if status != taskRunning && status != taskConflict {
-			return m.planNotice(t.ID + " has no running agent to mark done"), nil
+		if status != taskRunning && status != taskConflict && status != taskBlocked {
+			return m.planNotice(t.ID + " has no running or blocked agent to mark done"), nil
 		}
 		return m.planTaskOp("Marking "+t.ID+" done", func(o *orchestrator) error { return o.markDone(t.ID) })
 	case "t":
